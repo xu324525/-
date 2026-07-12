@@ -21,6 +21,15 @@ async function main() {
   await configPromise;
   const server = app.server;
 
+  // Block browser access — only Electron app can connect
+  const APP_TOKEN = 'music-buddy-electron';
+  app.use((req, res, next) => {
+    if (req.headers['x-app-token'] === APP_TOKEN) return next();
+    // Allow WebSocket upgrade (token checked in connection handler)
+    if (req.headers.upgrade === 'websocket') return next();
+    res.status(403).send('仅支持桌面客户端访问');
+  });
+
   // Agent routes
   app.get('/api/setup/status', (req, res) => {
     const key = process.env.DEEPSEEK_API_KEY || '';
