@@ -528,7 +528,7 @@ markPlayed(s.id);
         for (const s of deduped) s.play_url = urlMap[s.id] || '';
         const s = deduped[0];
         const showReason = prefs.showReason !== false;
-        send({ type: 'playlist_updated', playlist: deduped, current_index: 0, lyrics, reason: showReason ? (result.reason || '') : '', current_song: currentSongObj(s) });
+        send({ type: 'playlist_updated', playlist: deduped, current_index: 0, lyrics, append: isAutoContinue, reason: showReason ? (result.reason || '') : '', current_song: currentSongObj(s) });
         await addPlay({ name: s.name, ar: s.ar?.join('/') || '', id: s.id });
         const artists = [...new Set(unique.map(s => s.ar?.[0]).filter(Boolean))];
         if (artists.length) await updatePrefs({ topArtists: [...new Set([...(prefs.topArtists || []), ...artists])].slice(0, 15) });

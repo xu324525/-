@@ -369,7 +369,8 @@ audio.onloadedmetadata=function(){document.getElementById('durTime').textContent
 audio.onplay=function(){isPlaying=!0;updatePlayBtn();scrobbleStart()};
 audio.onpause=function(){isPlaying=!1;updatePlayBtn()};
 audio.onended=function(){clearInterval(scrobbleTimer);isPlaying=!1;updatePlayBtn();if(currentIdx<playlist.length-1){currentIdx++;updateUI(playlist[currentIdx],1,!0);loadLyrics(playlist[currentIdx].id);preloadNext()}else{autoContinue()}};
-audio.onerror=audio.onstalled=function(){if(!audio.src||audio.ended)return;var ct=audio.currentTime;audio.load();audio.currentTime=ct;audio.play().catch(function(){})};
+audio.onerror=function(){if(!audio.src||audio.ended)return;var ct=audio.currentTime;audio.load();audio.currentTime=ct;audio.play().catch(function(){})};
+audio.onstalled=function(){audio.play().catch(function(){})};
 
 function autoContinue(){if(!ws||ws.readyState!==1){setTimeout(autoContinue,2000);return}ws.send(JSON.stringify({type:'chat',content:'__prefetch__'}));setTimeout(function(){if(!isPlaying&&playlist.length>0&&playlist.length-currentIdx<=2)autoContinue()},8000)}
 
