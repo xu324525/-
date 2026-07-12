@@ -1,0 +1,451 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
+<meta http-equiv="Pragma" content="no-cache">
+<meta http-equiv="Expires" content="0">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>音乐老友</title>
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+:root{--accent:#6366f1;--accent-rgb:99,102,241;--bg:#0a0a0f;--surface:#141420;--surface2:#1a1a2e;--text:#e8e8f0;--text2:#8888aa;--text3:#555570}
+body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI','PingFang SC',sans-serif;background:var(--bg);color:var(--text);height:100vh;overflow:hidden;position:relative}
+
+/* Full-screen cover background */
+#bgCover{position:fixed;top:0;left:0;width:100%;height:100%;z-index:0;background-size:cover;background-position:center;filter:blur(30px) brightness(0.55) saturate(1.3);transform:scale(1.2);transition:background-image 0.8s ease}
+#bgCover::after{content:'';position:absolute;top:0;left:0;width:100%;height:100%;background:linear-gradient(to bottom,rgba(10,10,15,0.3),rgba(10,10,15,0.7))}
+
+/* Header */
+header{position:fixed;top:0;left:0;right:0;height:44px;display:flex;align-items:center;padding:0 20px;background:rgba(10,10,15,0.6);backdrop-filter:blur(20px);border-bottom:1px solid rgba(255,255,255,0.06);z-index:50}
+header .dot{width:7px;height:7px;border-radius:50%;margin-left:8px}
+header .dot.on{background:#22c55e;box-shadow:0 0 6px #22c55e}
+header .dot.off{background:#555}
+#loginBtn{font-size:12px;color:var(--text2);cursor:pointer;background:none;border:1px solid rgba(255,255,255,0.1);padding:3px 12px;border-radius:14px;transition:all .2s}
+#loginBtn:hover{color:#fff;border-color:var(--accent)}
+#loginBtn.logged{color:#22c55e;border-color:rgba(34,197,94,0.3)}
+#fsBtn{background:none;border:none;color:var(--text2);cursor:pointer;font-size:16px;padding:4px 8px;transition:color .2s}
+#fsBtn:hover{color:#fff}
+
+/* Main player area */
+#player{position:absolute;top:44px;left:0;right:0;bottom:0;display:flex;flex-direction:column;align-items:center;z-index:1;overflow:hidden;padding:24px 0 16px}
+
+/* Cover */
+#coverWrap{position:relative;margin-bottom:20px;flex-shrink:0}
+#cover{width:280px;height:280px;border-radius:50%;background:var(--surface2);display:flex;align-items:center;justify-content:center;font-size:64px;overflow:hidden;box-shadow:0 0 80px rgba(var(--accent-rgb),0.15),0 20px 60px rgba(0,0,0,0.6),0 0 0 1px rgba(255,255,255,0.08);transition:transform .5s ease,box-shadow .5s ease}
+#cover img{width:100%;height:100%;border-radius:50%;object-fit:cover}
+#cover.playing{animation:spin 20s linear infinite;box-shadow:0 0 120px rgba(var(--accent-rgb),0.25),0 20px 60px rgba(0,0,0,0.6),0 0 0 1px rgba(255,255,255,0.1)}
+@keyframes spin{to{transform:rotate(360deg)}}
+#coverGlow{position:absolute;top:-20px;left:-20px;right:-20px;bottom:-20px;border-radius:50%;background:radial-gradient(circle,rgba(var(--accent-rgb),0.4) 0%,transparent 70%);filter:blur(30px);z-index:-1;transition:opacity .8s}
+#coverRipple{position:absolute;top:-36px;left:-36px;right:-36px;bottom:-36px;border-radius:50%;border:2px solid rgba(var(--accent-rgb),0.5);z-index:-1;pointer-events:none;transition:transform .1s,opacity .1s}
+#coverRipple2{position:absolute;top:-58px;left:-58px;right:-58px;bottom:-58px;border-radius:50%;border:1.5px solid rgba(var(--accent-rgb),0.3);z-index:-1;pointer-events:none;transition:transform .1s,opacity .1s}
+#coverRipple3{position:absolute;top:-90px;left:-90px;right:-90px;bottom:-90px;border-radius:50%;border:1px solid rgba(var(--accent-rgb),0.15);z-index:-1;pointer-events:none;transition:transform .1s,opacity .1s}
+.screenRipple{position:fixed;border-radius:50%;pointer-events:none;z-index:0;box-shadow:0 0 30px rgba(var(--accent-rgb),0.1),inset 0 0 30px rgba(var(--accent-rgb),0.05);border:2px solid rgba(var(--accent-rgb),0.2);animation:screenRippleAnim 2.5s cubic-bezier(0.22,0.61,0.36,1) forwards}
+@keyframes screenRippleAnim{0%{transform:scale(0);opacity:0.5;filter:blur(0px)}50%{transform:scale(1.5);opacity:0.3;filter:blur(2px)}100%{transform:scale(4);opacity:0;filter:blur(8px)}}
+
+/* Song info */
+#songInfo{text-align:center;margin-bottom:16px;max-width:420px;flex-shrink:0;padding:12px 24px;background:rgba(255,255,255,0.02);border-radius:16px;backdrop-filter:blur(4px)}
+#songName{font-size:20px;font-weight:700;margin-bottom:4px;letter-spacing:0.5px;background:linear-gradient(135deg,#fff,var(--accent));-webkit-background-clip:text;-webkit-text-fill-color:transparent;background-clip:text}
+#songArtist{font-size:14px;color:var(--text2);margin-bottom:2px;letter-spacing:0.3px}
+#songReason{font-size:11px;color:var(--accent);font-style:italic;opacity:0.9;max-height:32px;overflow:hidden;transition:opacity .4s}
+
+/* Progress bar */
+#progressWrap{width:min(80%,480px);margin-bottom:16px;position:relative;flex-shrink:0}
+#progress{width:100%;height:4px;background:rgba(255,255,255,0.06);border-radius:3px;cursor:pointer;position:relative;transition:height .2s;overflow:visible}
+#progress:hover{height:6px}
+#progressBar{height:100%;background:var(--accent);border-radius:3px;width:0;transition:background .4s;position:relative;box-shadow:0 0 8px var(--accent)}
+#progressBar::after{content:'';position:absolute;right:-6px;top:50%;transform:translateY(-50%);width:12px;height:12px;border-radius:50%;background:#fff;box-shadow:0 0 10px var(--accent);opacity:0;transition:opacity .2s}
+#progress:hover #progressBar::after{opacity:1}
+#timeRow{display:flex;justify-content:space-between;font-size:11px;color:var(--text3);margin-top:6px;font-weight:500}
+
+/* Lyrics */
+#lyricsWrap{position:relative;width:100%;flex:1;min-height:160px;margin-bottom:16px;overflow:visible}
+#lyrics{width:100%;height:100%;position:relative}
+#lyrics p{position:absolute;line-height:1.3;white-space:nowrap;font-size:clamp(32px,5vw,56px);font-weight:700;color:var(--accent);transition:opacity .4s ease,transform .4s ease}
+#lyrics p.prev{top:20%;left:4%;right:50%;text-align:left}
+#lyrics p.next{bottom:20%;left:50%;right:4%;text-align:right}
+#lyrics p.entering{animation:lineIn .5s ease-out both}
+#lyrics p.exiting{animation:lineOut .3s ease-in both}
+@keyframes lineIn{from{opacity:0;transform:translateY(24px)}to{opacity:1;transform:translateY(0)}}
+@keyframes lineOut{from{opacity:1;transform:translateY(0)}to{opacity:0;transform:translateY(-16px)}}
+#lyrics .c{display:inline-block;animation:charIn .4s ease-out both}
+@keyframes charIn{from{transform:translateY(12px);filter:blur(4px)}to{transform:translateY(0);filter:blur(0)}}
+#lyrics p.hidden{opacity:0;pointer-events:none}
+
+/* Controls */
+#controls{display:flex;align-items:center;gap:28px;padding:8px 28px 24px;background:rgba(255,255,255,0.015);border-radius:40px;backdrop-filter:blur(8px);margin-bottom:max(env(safe-area-inset-bottom),8px)}
+#controls button{background:none;border:none;color:var(--text2);cursor:pointer;transition:all .25s;font-size:20px;position:relative}
+#controls button:hover{color:#fff;transform:scale(1.15);filter:drop-shadow(0 0 6px rgba(255,255,255,0.3))}
+#controls #playBtn{font-size:38px;width:64px;height:64px;border-radius:50%;background:linear-gradient(135deg,var(--accent),rgba(var(--accent-rgb),0.6));display:flex;align-items:center;justify-content:center;color:#fff;box-shadow:0 8px 24px rgba(var(--accent-rgb),0.4)}
+#controls #playBtn:hover{transform:scale(1.1);box-shadow:0 12px 32px rgba(var(--accent-rgb),0.6)}
+#controls #likeBtn{font-size:24px}
+#controls #likeBtn.liked{color:#ef4444;filter:drop-shadow(0 0 10px #ef4444)}
+#controls #reasonBtn{font-size:16px;opacity:0.6}
+#controls #reasonBtn:hover{opacity:1}
+
+/* Like animation */
+@keyframes likePop{0%{transform:scale(1)}30%{transform:scale(1.4)}60%{transform:scale(0.9)}100%{transform:scale(1)}}
+.like-pop{animation:likePop .4s ease}
+
+/* Cover tap feedback */
+@keyframes coverTap{0%{transform:scale(1)}50%{transform:scale(0.95)}100%{transform:scale(1)}}
+.cover-tap{animation:coverTap .2s ease}
+
+/* Next/prev slide */
+@keyframes slideLeft{0%{transform:translateX(0);opacity:1}100%{transform:translateX(-40px);opacity:0}}
+@keyframes slideRight{0%{transform:translateX(0);opacity:1}100%{transform:translateX(40px);opacity:0}}
+@keyframes slideIn{0%{opacity:0;transform:translateX(30px)}100%{opacity:1;transform:translateX(0)}}
+.slide-out-left{animation:slideLeft .25s ease forwards}
+.slide-out-right{animation:slideRight .25s ease forwards}
+.slide-in{animation:slideIn .25s ease forwards}
+
+/* Volume toast */
+#volToast{position:fixed;top:50%;left:50%;transform:translate(-50%,-50%);background:rgba(0,0,0,0.7);color:#fff;padding:12px 24px;border-radius:12px;font-size:18px;font-weight:600;opacity:0;transition:opacity .2s;pointer-events:none;z-index:200}
+
+/* Global ripple */
+.ripple{position:fixed;border-radius:50%;background:rgba(var(--accent-rgb),0.3);transform:scale(0);animation:rippleAnim .6s ease-out forwards;pointer-events:none;z-index:300}
+@keyframes rippleAnim{to{transform:scale(1);opacity:0}}
+
+/* Chat bubble (collapsed) */
+#chatBubble{position:fixed;top:56px;right:16px;width:44px;height:44px;border-radius:50%;background:var(--accent);display:flex;align-items:center;justify-content:center;font-size:20px;cursor:pointer;z-index:100;box-shadow:0 4px 20px rgba(var(--accent-rgb),0.4);transition:transform .2s,box-shadow .2s}
+#chatBubble:hover{transform:scale(1.08);box-shadow:0 6px 28px rgba(var(--accent-rgb),0.5)}
+#chatBubble.hidden{display:none}
+
+/* Chat panel - top right, 1/8 of screen */
+#chatPanel{position:fixed;top:56px;right:16px;width:25vw;height:50vh;min-width:260px;min-height:300px;background:rgba(10,10,20,0.25);backdrop-filter:blur(24px);border-radius:14px;border:1px solid rgba(255,255,255,0.08);display:flex;flex-direction:column;z-index:100;transition:opacity .3s,transform .3s;transform-origin:top right}
+#chatPanel.hidden{opacity:0;transform:scale(0.9);pointer-events:none}
+#chatPanel .chat-header{display:flex;align-items:center;padding:10px 14px;border-bottom:1px solid rgba(255,255,255,0.04);cursor:move;user-select:none}
+#chatPanel .chat-header span{font-size:13px;font-weight:600;flex:1;color:rgba(255,255,255,0.7)}
+#chatPanel .chat-header button{background:none;border:none;color:rgba(255,255,255,0.4);cursor:pointer;font-size:16px;padding:4px}
+#messages{flex:1;overflow-y:auto;padding:10px;scrollbar-width:thin;scrollbar-color:rgba(255,255,255,0.06) transparent}
+#messages::-webkit-scrollbar{width:3px}
+#messages::-webkit-scrollbar-thumb{background:rgba(255,255,255,0.08);border-radius:2px}
+.msg{margin-bottom:6px;max-width:90%;word-break:break-word;font-size:12px;line-height:1.5}
+.msg.agent{background:rgba(255,255,255,0.05);padding:8px 12px;border-radius:12px 12px 12px 3px;color:rgba(255,255,255,0.7)}
+.msg.user{background:rgba(var(--accent-rgb),0.3);padding:8px 12px;border-radius:12px 12px 3px 12px;margin-left:auto;color:rgba(255,255,255,0.85)}
+#inputRow{display:flex;gap:6px;padding:10px;border-top:1px solid rgba(255,255,255,0.04)}
+#inputRow input{flex:1;background:rgba(255,255,255,0.05);border:none;color:rgba(255,255,255,0.8);padding:8px 14px;border-radius:18px;font-size:12px;outline:none}
+#inputRow input::placeholder{color:rgba(255,255,255,0.25)}
+#inputRow input:focus{box-shadow:0 0 0 1px rgba(var(--accent-rgb),0.4)}
+#inputRow button{background:rgba(var(--accent-rgb),0.3);border:none;color:rgba(255,255,255,0.8);padding:8px 16px;border-radius:18px;font-size:12px;cursor:pointer;white-space:nowrap;border:1px solid rgba(var(--accent-rgb),0.2)}
+#inputRow button:hover{background:rgba(var(--accent-rgb),0.45)}
+
+/* Login modal */
+#loginModal{display:none;position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,0.7);backdrop-filter:blur(8px);z-index:200;align-items:center;justify-content:center}
+#loginModal.show{display:flex}
+#loginBox{background:var(--surface);border-radius:20px;padding:28px;text-align:center;max-width:320px;width:90%;border:1px solid rgba(255,255,255,0.06)}
+#loginBox h3{margin:0 0 16px;font-size:16px;color:var(--text)}
+#qrImg{width:200px;height:200px;border-radius:12px;background:var(--surface2);margin-bottom:12px}
+#loginStatus{font-size:12px;color:var(--text2);margin-bottom:14px}
+#loginClose{background:var(--surface2);border:none;color:var(--text2);padding:10px 28px;border-radius:10px;cursor:pointer;font-size:13px;transition:all .2s}
+#loginClose:hover{color:#fff;background:rgba(255,255,255,0.1)}
+
+/* Responsive */
+@media(max-width:768px){
+  #cover{width:200px;height:200px;font-size:48px}
+  #songName{font-size:17px}
+  #lyrics p.prev{font-size:26px}
+  #lyrics p.next{font-size:28px}
+  #controls{gap:18px;padding:6px 18px 20px}
+  #controls #playBtn{width:52px;height:52px;font-size:32px}
+  #chatPanel{width:calc(100% - 16px);height:50vh;right:8px}
+  #chatBubble{top:56px;right:8px}
+}
+@media(max-width:1024px) and (min-width:769px){
+  #cover{width:240px;height:240px}
+  #chatPanel{width:320px;height:400px}
+}
+</style>
+</head>
+<body>
+<div id="bgCover"></div>
+<header>
+  <div id="dot" class="dot off"></div>
+  <span id="statusText" style="font-size:11px;color:var(--text2);margin-left:8px"></span>
+  <div style="flex:1"></div>
+  <button id="fsBtn" onclick="toggleFs()" title="全屏">⛶</button>
+  <button id="loginBtn" onclick="openLogin()">登录</button>
+</header>
+
+<div id="player">
+  <div id="coverWrap">
+    <div id="coverGlow"></div>
+    <div id="coverRipple"></div>
+    <div id="coverRipple2"></div>
+    <div id="coverRipple3"></div>
+    <div id="cover">🎵</div>
+  </div>
+  <div id="songInfo">
+    <div id="songName">未在播放</div>
+    <div id="songArtist"></div>
+    <div id="songReason"></div>
+  </div>
+  <div id="progressWrap">
+    <div id="progress"><div id="progressBar"></div></div>
+    <div id="timeRow"><span id="curTime">0:00</span><span id="durTime">0:00</span></div>
+  </div>
+  <div id="lyricsWrap">
+    <div id="lyrics"></div>
+  </div>
+  <div id="controls">
+    <button id="reasonBtn" title="推荐理由">💡</button>
+    <button id="prevBtn">⏮</button>
+    <button id="playBtn">▶</button>
+    <button id="nextBtn">⏭</button>
+    <button id="likeBtn">♡</button>
+  </div>
+</div>
+
+<div id="chatBubble" onclick="toggleChat()">💬</div>
+
+<div id="chatPanel" class="hidden">
+  <div class="chat-header">
+    <span></span>
+    <button onclick="toggleChat()">✕</button>
+  </div>
+  <div id="messages"><div class="msg agent" id="welcomeMsg"></div></div>
+  <div id="inputRow">
+    <input id="chatInput" placeholder="说点什么...">
+    <button id="sendBtn">发送</button>
+  </div>
+</div>
+
+<audio id="audio" preload="auto"></audio>
+<div id="volToast"></div>
+
+<div id="loginModal">
+  <div id="loginBox">
+    <h3>扫码登录网易云</h3>
+    <img id="qrImg" src="" alt="QR Code">
+    <div id="loginStatus">打开网易云音乐APP扫码</div>
+    <button id="loginClose" onclick="closeLogin()">关闭</button>
+  </div>
+</div>
+
+<script>var isPlaying=!1,accentColor='#6366f1',currentIdx=-1;
+var playlist=[],lrcLines=[],ws=null,qrTimer=null,likedIds=new Set(),chatOpen=!1,coverGen=0,isLiked=!1;
+var scrobbleTimer=null,closingWs=!1;
+
+// Pre-parsed RGB values for fast accentRGBA (avoid repeated string parsing)
+var accentR=99,accentG=102,accentB=241;
+function accentRGBA(a){return'rgba('+accentR+','+accentG+','+accentB+','+a+')'}
+
+function status(m){var el=document.getElementById('statusText');if(el)el.textContent=m}
+window.addEventListener('error',function(e){status('JS Error: '+e.message)});
+
+var ripplePhase=0;
+function updateRipple(){
+  var r1=document.getElementById('coverRipple'),r2=document.getElementById('coverRipple2'),r3=document.getElementById('coverRipple3');
+  if(!r1)return requestAnimationFrame(updateRipple);
+  if(isPlaying){ripplePhase+=0.08;
+    r1.style.transform='scale('+(1+Math.sin(ripplePhase)*0.15)+')';r1.style.opacity=0.4+Math.sin(ripplePhase)*0.3;
+    r2.style.transform='scale('+(1+Math.sin(ripplePhase+1.2)*0.22)+')';r2.style.opacity=0.25+Math.sin(ripplePhase+0.8)*0.25;
+    r3.style.transform='scale('+(1+Math.sin(ripplePhase+2.4)*0.28)+')';r3.style.opacity=0.15+Math.sin(ripplePhase+1.6)*0.15;
+  }else{r1.style.transform='scale(1)';r1.style.opacity='0.2';r2.style.transform='scale(1)';r2.style.opacity='0.1';r3.style.transform='scale(1)';r3.style.opacity='0.05';}
+  requestAnimationFrame(updateRipple);
+}
+updateRipple();
+
+function spawnScreenRipple(){
+  if(!isPlaying)return;var cover=document.getElementById('coverWrap').getBoundingClientRect();
+  var cx=cover.left+cover.width/2,cy=cover.top+cover.height/2,size=Math.max(window.innerWidth,window.innerHeight);
+  for(var i=0;i<3;i++){(function(idx){setTimeout(function(){
+    var r=document.createElement('div');r.className='screenRipple';var s=size*(0.25+idx*0.1);
+    r.style.width=r.style.height=s+'px';r.style.left=cx-s/2+'px';r.style.top=cy-s/2+'px';
+    r.style.borderWidth=(3-idx)+'px';r.style.animationDuration=(2.5+idx*0.5)+'s';
+    document.body.appendChild(r);setTimeout(function(){r.remove()},3500);
+  },idx*150)})(i)}
+}
+setInterval(function(){if(isPlaying)spawnScreenRipple()},2500);
+
+function toggleFs(){if(!document.fullscreenElement)document.documentElement.requestFullscreen().catch(function(){});else document.exitFullscreen()}
+window.toggleFs=toggleFs;
+
+var audio=document.getElementById('audio');
+try{audio.volume=parseFloat(localStorage.getItem('volume'))||0.5}catch(e){audio.volume=0.5}
+audio.onvolumechange=function(){try{localStorage.setItem('volume',audio.volume)}catch(e){}};
+
+function setPlayCover(song){
+  var pic=song.picUrl,cover=document.getElementById('cover');
+  cover.innerHTML='';coverGen++;
+  var gen=coverGen;
+  if(pic){
+    var img=document.createElement('img');img.crossOrigin='anonymous';
+    img.onload=function(){if(gen===coverGen){cover.innerHTML='';cover.appendChild(img);setAccent(extractColor(img))}};
+    img.onerror=function(){if(gen===coverGen)cover.innerHTML='🎵'};
+    img.src=resizePic(pic,300);setBgCover(pic);
+  }else if(song.id){
+    fetch('/song/detail?ids='+song.id).then(function(r){return r.json()}).then(function(d){
+      if(gen!==coverGen)return;var p=d.songs?.[0]?.al?.picUrl;
+      if(p){var i2=document.createElement('img');i2.crossOrigin='anonymous';i2.onload=function(){if(gen===coverGen){cover.innerHTML='';cover.appendChild(i2);setAccent(extractColor(i2))}};i2.onerror=function(){if(gen===coverGen)cover.innerHTML='🎵'};i2.src=resizePic(p,300);song.picUrl=p;setBgCover(p)}else{cover.innerHTML='🎵'}
+    }).catch(function(){cover.innerHTML='🎵'})
+  }else{cover.innerHTML='🎵'}
+}
+function playCurrentSong(song){
+  if(!song)return;
+  if(!song.play_url&&song.id){
+    status('Fetching URL...');
+    fetch('/song/url?id='+song.id).then(function(r){return r.json()}).then(function(d){
+      song.play_url=d.data?.[0]?.url||'';if(song.play_url)playCurrentSong(song);else status('No URL');
+    }).catch(function(){status('URL fetch failed')});
+    return;
+  }
+  if(!song.play_url){status('No play URL');return}
+  currentIdx=playlist.findIndex(function(p){return p.id===song.id});if(currentIdx<0)currentIdx=0;
+  audio.pause();audio.src=song.play_url;audio.load();
+  audio.play().then(function(){isPlaying=!0;updatePlayBtn();document.getElementById('cover').classList.add('playing');status('')}).catch(function(e){status('Play err: '+e.message);console.warn('play err:',e.message)});
+}
+function playCurrent(song){playCurrentSong(song)}
+
+var scrobbleId=null;
+function scrobbleStart(){
+  var s=playlist[currentIdx];if(!s||!ws||ws.readyState!==1)return;
+  if(scrobbleId===s.id)return; // prevent duplicate starts
+  scrobbleId=s.id;
+  clearInterval(scrobbleTimer);
+  ws.send(JSON.stringify({type:'scrobble',songId:s.id,sourceId:s.alId||'',time:0}));
+  var elapsed=0;scrobbleTimer=setInterval(function(){if(!isPlaying||!ws||ws.readyState!==1){clearInterval(scrobbleTimer);scrobbleId=null;return}elapsed+=60;ws.send(JSON.stringify({type:'scrobble',songId:s.id,sourceId:s.alId||'',time:elapsed}))},60000);
+}
+
+function updatePlayBtn(){document.getElementById('playBtn').textContent=isPlaying?'⏸':'▶';document.getElementById('cover').classList.toggle('playing',isPlaying)}
+
+function connect(){
+  status('Connecting...');
+  ws=new WebSocket('ws://'+location.host+'/ws');var pingTimer;
+  ws.onopen=function(){document.getElementById('dot').className='dot on';status('Connected');
+    pingTimer=setInterval(function(){if(ws.readyState===1)ws.send(JSON.stringify({type:'ping'}))},30000);
+    setTimeout(function(){if(ws.readyState===1&&!isPlaying&&playlist.length===0){ws.send(JSON.stringify({type:'chat',content:'漫游'}));status('Sent roam')}},500);
+  };
+  ws.onclose=function(){document.getElementById('dot').className='dot off';clearInterval(pingTimer);if(closingWs){closingWs=!1;return}status('Reconnecting...');setTimeout(connect,5000)};
+  ws.onerror=function(){clearInterval(pingTimer)};
+  ws.onmessage=function(e){
+    var msg;try{msg=JSON.parse(e.data)}catch(e){return};
+    if(msg.type==='reply')appendMsg('agent',msg.content);
+    else if(msg.type==='control'){if(msg.action==='skip')document.getElementById('nextBtn').click();else if(msg.action==='prev')document.getElementById('prevBtn').click();else if(msg.action==='pause')document.getElementById('playBtn').click();else if(msg.action==='play')document.getElementById('playBtn').click()}
+    else if(msg.type==='playlist_updated'&&msg.playlist&&msg.playlist.length){
+      prefetchSent=!1;
+      var norm=function(s){return{id:s.id,name:s.name,ar:(s.ar||[]).map(function(a){return typeof a==='string'?a:a.name}),al:s.al,picUrl:s.al?.picUrl||s.picUrl,alId:s.alId||s.al?.id,dt:s.dt,play_url:s.play_url}};
+      var songs=msg.playlist.map(norm),cs=msg.current_song?norm(msg.current_song):null;
+      if(msg.append){
+        var seen=new Set(playlist.map(function(s){return s.id}));
+        var fresh=songs.filter(function(s){return !seen.has(s.id)});
+        if(fresh.length){playlist=playlist.concat(fresh)} // silent append, current song keeps playing
+      }else{
+        // New playlist: clear old, set as current, play immediately
+        playlist=songs;currentIdx=0;
+        if(cs){playlist[0]=cs}
+        var sg=cs||playlist[0];
+        audio.pause();audio.currentTime=0;
+        lrcLines=[];lastLrcIdx=-1;lastBase=-1;coverGen++;
+        document.getElementById('lyrics').innerHTML='';
+        document.getElementById('songName').textContent=sg.name;
+        document.getElementById('songArtist').textContent=sg.ar.join('/');
+        setPlayCover(sg);
+        checkLiked();
+        loadLyrics(sg.id);
+        if(sg.play_url)playCurrentSong(sg);
+        preloadNext();
+      }
+      status('Got '+playlist.length+' songs');
+      if(playlist.length-currentIdx<=2){setTimeout(function(){if(ws&&ws.readyState===1)ws.send(JSON.stringify({type:'chat',content:'__prefetch__'}))},3000)}
+      if(msg.reason){document.getElementById('songReason').textContent=msg.reason;document.getElementById('songReason').style.opacity='1'}
+    }
+  };
+  document.getElementById('sendBtn').onclick=function(){var v=document.getElementById('chatInput').value.trim();if(v&&ws.readyState===1){appendMsg('user',v);ws.send(JSON.stringify({type:'chat',content:v}));document.getElementById('chatInput').value=''}};
+  document.getElementById('chatInput').onkeydown=function(e){if(e.key==='Enter')document.getElementById('sendBtn').click()};
+  document.getElementById('playBtn').onclick=function(){if(isPlaying){audio.pause()}else{var s=playlist[currentIdx];if(s){if(s.play_url)playCurrent(s);else if(s.id){fetch('/song/url?id='+s.id).then(function(r){return r.json()}).then(function(d){s.play_url=d.data?.[0]?.url;if(s.play_url)playCurrent(s)}).catch(function(){})}}}updatePlayBtn()};
+  document.getElementById('nextBtn').onclick=function(){if(currentIdx<playlist.length-1){currentIdx++;updateUI(playlist[currentIdx],1,!0);loadLyrics(playlist[currentIdx].id);preloadNext()}else{autoContinue()}};
+  document.getElementById('prevBtn').onclick=function(){if(currentIdx>0){currentIdx--;updateUI(playlist[currentIdx],-1,!0);loadLyrics(playlist[currentIdx].id);preloadNext()}};
+  document.getElementById('likeBtn').onclick=function(){var s=playlist[currentIdx];if(!s)return;isLiked=!isLiked;var lb=document.getElementById('likeBtn');lb.className=isLiked?'liked':'';lb.textContent=isLiked?'❤':'♡';lb.classList.add('like-pop');setTimeout(function(){lb.classList.remove('like-pop')},400);if(isLiked)likedIds.add(s.id);else likedIds.delete(s.id);syncLike(s.id,isLiked)};
+  document.getElementById('reasonBtn').onclick=function(){var s=playlist[currentIdx];if(!s)return;var name=s.name+' - '+(s.ar||[]).map(function(a){return a.name||a}).join('/');if(ws&&ws.readyState===1)ws.send(JSON.stringify({type:'chat',content:'推荐理由：'+name}))};
+}
+
+var prefetchSent=!1;
+audio.ontimeupdate=function(){var p=audio.duration?(audio.currentTime/audio.duration)*100:0;document.getElementById('progressBar').style.width=p+'%';document.getElementById('curTime').textContent=fmtTime(audio.currentTime);highlightLyric();
+  // Smart prefetch: when <30s remaining and near end of playlist
+  if(!prefetchSent&&audio.duration&&audio.duration-audio.currentTime<30&&playlist.length-currentIdx<=3&&ws&&ws.readyState===1){prefetchSent=!0;ws.send(JSON.stringify({type:'chat',content:'__prefetch__'}))}
+};
+audio.onloadedmetadata=function(){document.getElementById('durTime').textContent=fmtTime(audio.duration)};
+audio.onplay=function(){isPlaying=!0;updatePlayBtn();scrobbleStart()};
+audio.onpause=function(){isPlaying=!1;updatePlayBtn()};
+audio.onended=function(){clearInterval(scrobbleTimer);isPlaying=!1;updatePlayBtn();if(currentIdx<playlist.length-1){currentIdx++;updateUI(playlist[currentIdx],1,!0);loadLyrics(playlist[currentIdx].id);preloadNext()}else{autoContinue()}};
+audio.onerror=audio.onstalled=function(){if(!audio.src||audio.ended)return;var ct=audio.currentTime;audio.load();audio.currentTime=ct;audio.play().catch(function(){})};
+
+function autoContinue(){if(!ws||ws.readyState!==1){setTimeout(autoContinue,2000);return}ws.send(JSON.stringify({type:'chat',content:'__prefetch__'}));setTimeout(function(){if(!isPlaying&&playlist.length>0&&playlist.length-currentIdx<=2)autoContinue()},8000)}
+
+document.getElementById('progress').onclick=function(e){var r=e.currentTarget.getBoundingClientRect();audio.currentTime=((e.clientX-r.left)/r.width)*(audio.duration||0)};
+
+(function(){var cover=document.getElementById('cover'),startX=0,startTime=0,tapCount=0,tapTimer=null;
+cover.addEventListener('click',function(e){tapCount++;if(tapCount===1){tapTimer=setTimeout(function(){tapCount=0;cover.classList.add('cover-tap');setTimeout(function(){cover.classList.remove('cover-tap')},200);if(isPlaying)audio.pause();else audio.play().catch(function(){})},250)}else if(tapCount===2){clearTimeout(tapTimer);tapCount=0;var lb=document.getElementById('likeBtn');lb.click();lb.classList.add('like-pop');setTimeout(function(){lb.classList.remove('like-pop')},400)}});
+cover.addEventListener('touchstart',function(e){startX=e.touches[0].clientX;startTime=Date.now()},{passive:!0});
+cover.addEventListener('touchend',function(e){var dx=e.changedTouches[0].clientX-startX,dt=Date.now()-startTime;if(Math.abs(dx)>60&&dt<300){if(dx<0)document.getElementById('nextBtn').click();else document.getElementById('prevBtn').click()}},{passive:!0})})();
+
+var volTimer=null;
+function showVol(){var t=document.getElementById('volToast');t.textContent=Math.round(audio.volume*100)+'%';t.style.opacity='1';clearTimeout(volTimer);volTimer=setTimeout(function(){t.style.opacity='0'},800)}
+
+document.addEventListener('keydown',function(e){if(e.target.tagName==='INPUT')return;
+  switch(e.code){case'Space':e.preventDefault();if(isPlaying)audio.pause();else audio.play().catch(function(){});break;
+    case'ArrowRight':audio.currentTime=Math.min(audio.currentTime+5,audio.duration||0);break;case'ArrowLeft':audio.currentTime=Math.max(audio.currentTime-5,0);break;
+    case'ArrowUp':e.preventDefault();audio.volume=Math.min(audio.volume+0.1,1);showVol();break;case'ArrowDown':e.preventDefault();audio.volume=Math.max(audio.volume-0.1,0);showVol();break;
+    case'KeyN':document.getElementById('nextBtn').click();break;case'KeyP':document.getElementById('prevBtn').click();break;case'KeyL':document.getElementById('likeBtn').click();break}});
+
+document.getElementById('player').addEventListener('wheel',function(e){e.preventDefault();audio.volume=Math.max(0,Math.min(1,audio.volume+(e.deltaY>0?-0.05:0.05)));showVol()},{passive:!1});
+
+document.addEventListener('click',function(e){var r=document.createElement('div');r.className='ripple';r.style.left=e.clientX-25+'px';r.style.top=e.clientY-25+'px';r.style.width=r.style.height='50px';document.body.appendChild(r);setTimeout(function(){r.remove()},600)});
+
+(function(){var bar=document.getElementById('progress'),dragging=!1;bar.addEventListener('mousedown',function(e){dragging=!0;seek(e)});document.addEventListener('mousemove',function(e){if(dragging)seek(e)});document.addEventListener('mouseup',function(){dragging=!1});function seek(e){var r=bar.getBoundingClientRect();audio.currentTime=((e.clientX-r.left)/r.width)*(audio.duration||0)}})();
+
+var colorCache={};
+function extractColor(imgEl){var src=imgEl.src;if(colorCache[src])return colorCache[src];try{var c=document.createElement('canvas');c.width=c.height=1;var ctx=c.getContext('2d');ctx.drawImage(imgEl,0,0,1,1);var d=ctx.getImageData(0,0,1,1).data;var col=d[0]+d[1]+d[2]<30?'rgb(99,102,241)':'rgb('+d[0]+','+d[1]+','+d[2]+')';colorCache[src]=col;return col}catch(e){return'rgb(99,102,241)'}}
+
+function setAccent(color){accentColor=color;document.documentElement.style.setProperty('--accent',color);var m=color.match(/(\d+)/g);if(m){document.documentElement.style.setProperty('--accent-rgb',m.slice(0,3).join(','));accentR=parseInt(m[0]);accentG=parseInt(m[1]);accentB=parseInt(m[2])}}
+
+function toggleChat(){chatOpen=!chatOpen;document.getElementById('chatPanel').classList.toggle('hidden',!chatOpen);document.getElementById('chatBubble').classList.toggle('hidden',chatOpen)}
+window.toggleChat=toggleChat;
+
+(function(){var panel=document.getElementById('chatPanel'),header=panel.querySelector('.chat-header'),isDrag=!1,ox,oy,sx,sy;header.addEventListener('mousedown',function(e){isDrag=!0;ox=e.clientX;oy=e.clientY;var r=panel.getBoundingClientRect();sx=r.left;sy=r.top;e.preventDefault()});document.addEventListener('mousemove',function(e){if(!isDrag)return;panel.style.left=(sx+e.clientX-ox)+'px';panel.style.top=(sy+e.clientY-oy)+'px';panel.style.right='auto';panel.style.bottom='auto'});document.addEventListener('mouseup',function(){isDrag=!1})})();
+
+function openLogin(){document.getElementById('loginModal').classList.add('show');startQRLogin()}
+function closeLogin(){document.getElementById('loginModal').classList.remove('show');clearInterval(qrTimer)}
+window.openLogin=openLogin;window.closeLogin=closeLogin;
+
+async function startQRLogin(){try{var r=await fetch('/login/qr/key?timestamp='+Date.now()),d=await r.json(),key=d.data?.unikey;if(!key)return;var r2=await fetch('/login/qr/create?key='+key+'&platform=web&qrimg=true&timestamp='+Date.now()+'&ua=pc'),d2=await r2.json();document.getElementById('qrImg').src=d2.data?.qrimg||'';document.getElementById('loginStatus').textContent='打开网易云音乐APP扫码';clearInterval(qrTimer);qrTimer=setInterval(async function(){try{var sr=await fetch('/login/qr/check?key='+key+'&timestamp='+Date.now()+'&ua=pc'),sd=await sr.json();if(sd.code===800){document.getElementById('loginStatus').textContent='二维码过期';clearInterval(qrTimer)}if(sd.code===803){clearInterval(qrTimer);document.getElementById('loginStatus').textContent='登录成功';document.getElementById('loginBtn').textContent='已登录';document.getElementById('loginBtn').classList.add('logged');fetchLikedIds();setTimeout(function(){closeLogin();closingWs=!0;if(ws)ws.close();connect()},1000)}if(sd.code===801)document.getElementById('loginStatus').textContent='等待扫码...';if(sd.code===802)document.getElementById('loginStatus').textContent='已扫码，等待确认...'}catch(e){}},3000)}catch(e){document.getElementById('loginStatus').textContent='登录失败: '+e.message}}
+
+(async function(){try{var r=await fetch('/login/status?timestamp='+Date.now()),d=await r.json();var profile=d.data?.profile||d.profile;if(profile?.userId){document.getElementById('loginBtn').textContent=profile.nickname||'已登录';document.getElementById('loginBtn').classList.add('logged');fetchLikedIds()}}catch(e){}})();
+
+async function fetchLikedIds(){try{var r=await fetch('/likelist'),d=await r.json();likedIds=new Set((d.ids||[]).map(String))}catch(e){}}
+async function syncLike(songId,like){try{await fetch('/like?id='+songId+'&like='+like)}catch(e){}}
+function checkLiked(){var s=playlist[currentIdx];isLiked=s?likedIds.has(s.id):!1;var lb=document.getElementById('likeBtn');lb.className=isLiked?'liked':'';lb.textContent=isLiked?'❤':'♡'}
+function fmtTime(s){var m=Math.floor(s/60),sec=Math.floor(s%60);return m+':'+String(sec).padStart(2,'0')}
+
+function appendMsg(role,text){if(role==='agent'&&!chatOpen)toggleChat();var d=document.createElement('div');d.className='msg '+role;var lines=text.split('\n'),hasList=lines.some(function(l){return /^\d+\.\s/.test(l.trim())});if(hasList&&role==='agent'){d.innerHTML='';lines.forEach(function(l){var p=document.createElement('div');if(/^\d+\.\s/.test(l.trim())){p.style.cssText='cursor:pointer;padding:3px 0;color:var(--accent);transition:opacity .2s';p.textContent=l;p.onclick=function(){var num=l.match(/^(\d+)\./)?.[1];if(num&&ws&&ws.readyState===1){appendMsg('user','放第'+num+'首');ws.send(JSON.stringify({type:'chat',content:'放第'+num+'首'}))}};p.onmouseover=function(){p.style.opacity='0.7'};p.onmouseout=function(){p.style.opacity='1'}}else p.textContent=l;d.appendChild(p)})}else d.textContent=text;document.getElementById('messages').appendChild(d);document.getElementById('messages').scrollTop=document.getElementById('messages').scrollHeight}
+
+function renderLyrics(lines){lrcLines=lines||[];var box=document.getElementById('lyrics');if(!lrcLines.length){box.innerHTML='<p style="color:var(--text3);position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);font-size:18px">暂无歌词</p>';return}box.innerHTML=lrcLines.map(function(l,i){var letters=l.text.split(''),n=letters.length,chars=letters.map(function(c,j){if(c===' ')return' ';var t=n>1?j/(n-1):0,col=lerpAccent(t);return'<span class=c style=animation-delay:'+j*0.03+'s;color:'+col+'>'+c+'</span>'}).join('');return'<p data-idx='+i+' class=hidden>'+chars+'</p>'}).join('')}
+
+function lerpAccent(t){var r=99,g=102,b=241;if(accentColor.startsWith('#')){var h=accentColor.replace('#','');r=parseInt(h.substring(0,2),16);g=parseInt(h.substring(2,4),16);b=parseInt(h.substring(4,6),16)}else{var m=accentColor.match(/(\d+)/g);if(m){r=parseInt(m[0]);g=parseInt(m[1]);b=parseInt(m[2])}}return'rgb('+Math.round(r+(255-r)*t)+','+Math.round(g+(255-g)*t)+','+Math.round(b+(255-b)*t)+')'}
+
+function parseLrc(raw){var parsed=[],re=/\[(\d{2}):(\d{2})\.(\d{2,3})\](.*)/g,m;while((m=re.exec(raw))!==null){var t=parseInt(m[1])*60+parseInt(m[2])+parseInt(m[3])/(m[3].length===3?1000:100),txt=m[4].trim();if(txt)parsed.push({time:t,text:txt})}return parsed}
+
+var lrcGen=0;
+function loadLyrics(id){lrcLines=[];lastLrcIdx=-1;lastBase=-1;var g=++lrcGen;fetch('/lyric?id='+id).then(function(r){return r.json()}).then(function(d){if(g===lrcGen)renderLyrics(parseLrc(d.lrc?.lyric||''))}).catch(function(){})}
+
+var lastLrcIdx=-1,lastBase=-1;
+function highlightLyric(){if(!lrcLines.length)return;var t=audio.currentTime,idx=-1;for(var i=lrcLines.length-1;i>=0;i--){if(t>=lrcLines[i].time){idx=i;break}}if(idx===lastLrcIdx)return;var base=idx%2===0?idx:idx-1;if(base===lastBase){lastLrcIdx=idx;return}lastLrcIdx=idx;var prevBase=lastBase;lastBase=base;var ps=document.getElementById('lyrics').querySelectorAll('p');if(base!==prevBase){ps.forEach(function(p){if(p.classList.contains('prev')||p.classList.contains('next'))p.classList.add('exiting')});setTimeout(function(){ps.forEach(function(p,i){if(i===base){p.className='prev entering';resetCharDelay(p)}else if(i===base+1){p.className='next entering';resetCharDelay(p)}else p.className='hidden'})},280)}}
+
+function resetCharDelay(el){el.querySelectorAll('.c').forEach(function(c,j){c.style.animation='none';c.offsetHeight;c.style.animation='';c.style.animationDelay=(j*0.03)+'s'})}
+
+function resizePic(url,size){if(!url||!url.includes('music.126.net'))return url;var s=size||300;return url.replace(/\?.*$/,'')+'?param='+s+'y'+s}
+function setBgCover(url){if(url)document.getElementById('bgCover').style.backgroundImage='url('+resizePic(url,400)+')'}
+
+function updateUI(song,direction,autoplay){if(!song)return;prefetchSent=!1;document.getElementById('songName').textContent=song.name;document.getElementById('songArtist').textContent=song.ar.join('/');setPlayCover(song);checkLiked();if(autoplay&&song.play_url)playCurrentSong(song)}
+
+// Preload next song's cover in background
+var preloadImg=new Image();
+function preloadNext(){var next=playlist[currentIdx+1];if(next){var pic=next.al?.picUrl||next.picUrl;if(pic){preloadImg.src=resizePic(pic,300)}if(next.play_url){fetch(next.play_url).catch(function(){})}}}
+
+document.getElementById('welcomeMsg').textContent=(function(){var h=new Date().getHours();if(h<6)return'深夜了...';if(h<9)return'早安！';if(h<12)return'上午好';if(h<14)return'午安';if(h<18)return'下午好';if(h<21)return'晚上好';return'夜深了'})();
+
+connect();
+</script>
+</body>
+</html>
