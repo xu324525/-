@@ -342,8 +342,7 @@ function connect(){
         document.getElementById('songArtist').textContent=sg.ar.join('/');
         setPlayCover(sg);
         checkLiked();
-        loadLyrics(sg.id);
-        if(sg.play_url)playCurrentSong(sg);
+        if(sg.play_url){loadLyrics(sg.id);playCurrentSong(sg)};
         preloadNext();
       }
       status('Got '+playlist.length+' songs');
@@ -354,8 +353,8 @@ function connect(){
   document.getElementById('sendBtn').onclick=function(){var v=document.getElementById('chatInput').value.trim();if(v&&ws.readyState===1){appendMsg('user',v);ws.send(JSON.stringify({type:'chat',content:v}));document.getElementById('chatInput').value=''}};
   document.getElementById('chatInput').onkeydown=function(e){if(e.key==='Enter')document.getElementById('sendBtn').click()};
   document.getElementById('playBtn').onclick=function(){if(isPlaying){audio.pause()}else{var s=playlist[currentIdx];if(s){if(s.play_url)playCurrent(s);else if(s.id){fetch('/song/url?id='+s.id).then(function(r){return r.json()}).then(function(d){s.play_url=d.data?.[0]?.url;if(s.play_url)playCurrent(s)}).catch(function(){})}}}updatePlayBtn()};
-  document.getElementById('nextBtn').onclick=function(){if(currentIdx<playlist.length-1){currentIdx++;updateUI(playlist[currentIdx],1,!0);loadLyrics(playlist[currentIdx].id);preloadNext()}else{autoContinue()}};
-  document.getElementById('prevBtn').onclick=function(){if(currentIdx>0){currentIdx--;updateUI(playlist[currentIdx],-1,!0);loadLyrics(playlist[currentIdx].id);preloadNext()}};
+  document.getElementById('nextBtn').onclick=function(){if(currentIdx<playlist.length-1){currentIdx++;var ns=playlist[currentIdx];updateUI(ns,1,ns.play_url);if(ns.play_url)loadLyrics(ns.id);preloadNext()}else{autoContinue()}};
+  document.getElementById('prevBtn').onclick=function(){if(currentIdx>0){currentIdx--;var ps=playlist[currentIdx];updateUI(ps,-1,ps.play_url);if(ps.play_url)loadLyrics(ps.id);preloadNext()}};
   document.getElementById('likeBtn').onclick=function(){var s=playlist[currentIdx];if(!s)return;isLiked=!isLiked;var lb=document.getElementById('likeBtn');lb.className=isLiked?'liked':'';lb.textContent=isLiked?'❤':'♡';lb.classList.add('like-pop');setTimeout(function(){lb.classList.remove('like-pop')},400);if(isLiked)likedIds.add(s.id);else likedIds.delete(s.id);syncLike(s.id,isLiked)};
   document.getElementById('reasonBtn').onclick=function(){var s=playlist[currentIdx];if(!s)return;var name=s.name+' - '+(s.ar||[]).map(function(a){return a.name||a}).join('/');if(ws&&ws.readyState===1)ws.send(JSON.stringify({type:'chat',content:'推荐理由：'+name}))};
 }
@@ -368,8 +367,8 @@ audio.ontimeupdate=function(){var p=audio.duration?(audio.currentTime/audio.dura
 audio.onloadedmetadata=function(){document.getElementById('durTime').textContent=fmtTime(audio.duration)};
 audio.onplay=function(){isPlaying=!0;updatePlayBtn();scrobbleStart()};
 audio.onpause=function(){isPlaying=!1;updatePlayBtn()};
-audio.onended=function(){clearInterval(scrobbleTimer);isPlaying=!1;updatePlayBtn();if(currentIdx<playlist.length-1){currentIdx++;updateUI(playlist[currentIdx],1,!0);loadLyrics(playlist[currentIdx].id);preloadNext()}else{autoContinue()}};
-audio.onerror=function(){if(!audio.src||audio.ended)return;var ct=audio.currentTime;audio.load();audio.currentTime=ct;audio.play().catch(function(){})};
+audio.onended=function(){clearInterval(scrobbleTimer);isPlaying=!1;updatePlayBtn();if(currentIdx<playlist.length-1){currentIdx++;var es=playlist[currentIdx];updateUI(es,1,es.play_url);if(es.play_url)loadLyrics(es.id);preloadNext()}else{autoContinue()}};
+audio.onerror=function(){if(!audio.src||audio.ended)return;document.getElementById("nextBtn").click()};
 audio.onstalled=function(){audio.play().catch(function(){})};
 
 function autoContinue(){if(!ws||ws.readyState!==1){setTimeout(autoContinue,2000);return}ws.send(JSON.stringify({type:'chat',content:'__prefetch__'}));setTimeout(function(){if(!isPlaying&&playlist.length>0&&playlist.length-currentIdx<=2)autoContinue()},8000)}
