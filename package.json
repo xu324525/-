@@ -5,6 +5,7 @@
   "main": "electron/main.js",
   "scripts": {
     "start": "node agent-server.js",
+    "dev": "nodemon agent-server.js",
     "electron": "electron .",
     "electron:dev": "electron . --dev",
     "build:win": "electron-builder --win",
@@ -44,6 +45,7 @@
     "yargs": "^18.0.0"
   },
   "devDependencies": {
+    "electron-builder": "^26.0.0",
     "nodemon": "^3.1.11"
   }
 }

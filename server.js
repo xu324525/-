@@ -11,6 +11,9 @@ const fileUpload = require('express-fileupload')
 const decode = require('safe-decode-uri-component')
 const logger = require('./util/logger.js')
 
+// Must match frontend router paths
+const SPA_ROUTES = ['/', '/login', '/discover', '/search', '/playlist', '/playing', '/profile', '/my-liked-songs', '/my-playlists', '/highquality', '/artists', '/artist']
+
 /**
  * The version check result.
  * @readonly
@@ -334,8 +337,7 @@ async function consturctServer(moduleDefs) {
       // 只处理 GET 请求且不包含文件扩展名的路径
       if (req.method === 'GET' && !req.path.includes('.')) {
         // 检查是否是前端路由（通常是 /login, /discover 等）
-        const frontendRoutes = ['/', '/login', '/discover', '/search', '/playlist', '/playing', '/profile', '/my-liked-songs', '/my-playlists', '/highquality', '/artists', '/artist']
-        const isFrontendRoute = frontendRoutes.some(route => 
+        const isFrontendRoute = SPA_ROUTES.some(route => 
           req.path === route || req.path.startsWith(route + '/')
         )
         

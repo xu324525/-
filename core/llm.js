@@ -1,7 +1,7 @@
 import axios from 'axios';
 import config from '../config.js';
 
-export async function chat(systemPrompt, userMessage, history = [], maxTokens = 800) {
+export async function askLLM(systemPrompt, userMessage, history = [], maxTokens = 800) {
   const messages = [
     { role: 'system', content: systemPrompt },
     ...history,
@@ -35,7 +35,7 @@ export async function chat(systemPrompt, userMessage, history = [], maxTokens = 
       }
     }
   }
-  console.error('[claude] API error after retries:', lastError?.response?.status, lastError?.message);
+  console.error('[llm] API error after retries:', lastError?.response?.status, lastError?.message);
   return null;
 }
 
