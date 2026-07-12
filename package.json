@@ -1,7 +1,7 @@
 {
   "name": "music-buddy",
   "version": "4.0.0",
-  "description": "音乐老友 — 会说人话的 AI 桌面音乐伴侣。基于 NetEaseCloudMusicApi + DeepSeek LLM + Electron",
+  "description": "音乐老友 AI 桌面音乐",
   "main": "electron/main.js",
   "scripts": {
     "start": "node agent-server.js",
