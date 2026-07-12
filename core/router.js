@@ -1,6 +1,6 @@
 import { chat, parseResponse } from './claude.js';
 import { buildSystemPrompt, buildChatHistory } from './context.js';
-import { addMessage, addPlay, updatePrefs, getPrefs, getRecentPlays, getRecentMessages } from '../state/db.js';
+import { addMessage, addPlay, updatePrefs, getPrefs, getRecentPlays, getRecentMessages, getSongStats, getArtistStats, getTopArtistsLongTerm, wasPlayedRecently, getSessionStats } from '../state/db.js';
 import { analyzePatterns, maybeSummarize, rememberLine, forgetLine } from './memory.js';
 import { state } from './list-state.js';
 import config from '../config.js';
@@ -11,7 +11,7 @@ const API = `http://${config.HOST}:${config.PORT}`;
 // Session-level dedup — no song repeats within the same run
 const sessionPlayedIds = new Set();
 function markPlayed(id) { sessionPlayedIds.add(id); }
-function isRecentlyPlayed(id, n = 50) { return getRecentPlays(n).some(p => p.id === id) || sessionPlayedIds.has(id); }
+function isRecentlyPlayed(id) { return getRecentPlays(50).some(p => p.id === id) || sessionPlayedIds.has(id) || wasPlayedRecently(id, 24); }
 
 // Fisher-Yates shuffle
 function shuffle(arr) { for (let i = arr.length - 1; i > 0; i--) { const j = Math.floor(Math.random() * (i + 1)); [arr[i], arr[j]] = [arr[j], arr[i]]; } return arr; }
@@ -178,16 +178,23 @@ async function fetchSimilarSongs(songId) {
 
 function scoreSong(song, prefs) {
   let score = 0;
-  const topArtists = prefs.topArtists || [];
+  // Long-term artist affinity (from play history, not just prefs)
+  const topArtists = getTopArtistsLongTerm(10).map(a => a.name);
   for (const a of (song.ar || []).filter(Boolean)) {
     const idx = topArtists.indexOf(a);
     if (idx >= 0) score += (topArtists.length - idx) * 2;
+    // Bonus for artists with high play count
+    const stats = getArtistStats(a);
+    if (stats && stats.playCount > 10) score += Math.min(stats.playCount, 30);
   }
   if ((song.dt || 0) > 180000) score += 2;
+  // Penalize overplayed songs (long-term fatigue)
+  const songStats = getSongStats(song.id);
+  if (songStats && songStats.playCount > 20) score -= songStats.playCount;
   // Penalize recently played songs (last 50, exponential decay for recency)
   const recent = getRecentPlays(50);
   const idx = recent.findIndex(p => p.id === song.id);
-  if (idx >= 0) score -= 200 + (50 - idx) * 10; // recently played penalized harder
+  if (idx >= 0) score -= 200 + (50 - idx) * 10;
   return score;
 }
 

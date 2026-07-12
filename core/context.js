@@ -1,7 +1,7 @@
 import { readFileSync, existsSync } from 'fs';
 import { resolve } from 'path';
 import config from '../config.js';
-import { getRecentMessages, getRecentPlays, getPrefs } from '../state/db.js';
+import { getRecentMessages, getRecentPlays, getPrefs, getTopArtistsLongTerm, getSessionStats } from '../state/db.js';
 import { buildMemoryContext, getSessionTopic } from './memory.js';
 
 function readUserFile(name) {
@@ -52,6 +52,18 @@ ${loginInfo.loggedIn ? `用户已登录网易云：${loginInfo.nickname}` : '用
 ${taste ? '用户自述口味：' + taste.slice(0,200) : ''}
 
 ${buildMemoryContext()}
+
+${(() => {
+  const topA = getTopArtistsLongTerm(5);
+  const sess = getSessionStats();
+  if (topA.length || sess.totalPlays > 0) {
+    let s = '';
+    if (topA.length) s += `长期最爱歌手: ${topA.map(a => a.name + '(' + a.playCount + '次)').join('、')}`;
+    if (sess.totalPlays > 10) s += ` | 累计播放${sess.totalPlays}首`;
+    return s;
+  }
+  return '';
+})()}
 
 最近播放过：${recentTracks || '暂无记录'}
 
