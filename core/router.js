@@ -26,8 +26,7 @@ function artistCooldown(songs, window = 4) {
     // Find a song whose artist is not in the last 'window' results
     const recentArtists = new Set(result.slice(-window).map(lastArtist).filter(Boolean));
     let idx = pool.findIndex(s => !recentArtists.has(lastArtist(s)));
-    if (idx < 0) idx = pool.findIndex(s => !recentArtists.has(lastArtist(s)) || true); // fallback: any
-    if (idx < 0) idx = 0;
+    if (idx < 0) idx = Math.floor(Math.random() * pool.length); // fallback: random
     result.push(pool[idx]);
     pool.splice(idx, 1);
   }
@@ -174,31 +173,6 @@ async function fetchSimilarSongs(songId) {
   try {
     const r = await axios.get(`${API}/simi/song?id=${songId}`);
     return (r.data?.songs || []).map(mapSong);
-  } catch { return []; }
-}
-
-async function fetchPersonalized(limit = 10) {
-  try {
-    const r = await axios.get(`${API}/personalized?limit=${limit}`);
-    return (r.data?.result || []).map(p => ({
-      id: p.id, name: p.name, picUrl: p.picUrl || '', playCount: p.playCount || 0, trackCount: p.trackCount || 0,
-    }));
-  } catch { return []; }
-}
-
-async function fetchPlaylistHot() {
-  try {
-    const r = await axios.get(`${API}/playlist/hot`);
-    return (r.data?.tags || []).map(t => ({ id: t.id, name: t.name, category: t.category || 0 }));
-  } catch { return []; }
-}
-
-async function fetchPlaylistByCategory(cat, limit = 10) {
-  try {
-    const r = await axios.get(`${API}/top/playlist?cat=${encodeURIComponent(cat)}&limit=${limit}`);
-    return (r.data?.playlists || []).map(p => ({
-      id: p.id, name: p.name, picUrl: p.coverImgUrl || '', playCount: p.playCount || 0, trackCount: p.trackCount || 0,
-    }));
   } catch { return []; }
 }
 
@@ -555,7 +529,6 @@ markPlayed(s.id);
         const s = deduped[0];
         const showReason = prefs.showReason !== false;
         send({ type: 'playlist_updated', playlist: deduped, current_index: 0, lyrics, reason: showReason ? (result.reason || '') : '', current_song: currentSongObj(s) });
-markPlayed(s.id);
         await addPlay({ name: s.name, ar: s.ar?.join('/') || '', id: s.id });
         const artists = [...new Set(unique.map(s => s.ar?.[0]).filter(Boolean))];
         if (artists.length) await updatePrefs({ topArtists: [...new Set([...(prefs.topArtists || []), ...artists])].slice(0, 15) });

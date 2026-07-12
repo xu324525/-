@@ -17,8 +17,6 @@ export function getMemorySnapshot() {
   return _snapshot;
 }
 
-export function reloadSnapshot() { _snapshot = null; return getMemorySnapshot(); }
-
 // Agent-controlled memory writes (add/remove lines)
 export async function rememberLine(text) {
   const current = getMemorySnapshot();
@@ -49,11 +47,11 @@ function factId(content) {
   return Math.abs(h).toString(36);
 }
 
-export function getFacts() {
+function getFacts() {
   return getPrefs().facts || [];
 }
 
-export async function addFact(category, content, confidence = 0.5) {
+async function addFact(category, content, confidence = 0.5) {
   const prefs = getPrefs();
   const facts = prefs.facts || [];
   const id = factId(content.slice(0, 60));
@@ -74,12 +72,6 @@ export async function addFact(category, content, confidence = 0.5) {
   await updatePrefs({ facts });
 }
 
-export async function removeFact(pattern) {
-  const prefs = getPrefs();
-  const facts = (prefs.facts || []).filter(f => !f.content.includes(pattern));
-  await updatePrefs({ facts });
-}
-
 function formatFacts(facts) {
   if (!facts || !facts.length) return '';
   const byCat = {};
@@ -97,7 +89,7 @@ function formatFacts(facts) {
 
 // ---- 3. WRITE-BEFORE-COMPRESS: LLM Fact Extraction ----
 
-export async function extractFacts() {
+async function extractFacts() {
   const messages = getRecentMessages(80);
   if (messages.length < 20) return;
 
@@ -327,8 +319,6 @@ export function analyzePatterns() {
 
 // ---- 6. BUILD MEMORY CONTEXT (injected into system prompt) ----
 
-export function getSummary() { return getPrefs().summary || ''; }
-
 export function buildMemoryContext() {
   const prefs = getPrefs();
   const parts = [];
@@ -400,35 +390,3 @@ export function getSessionTopic() {
   return '';
 }
 
-// ---- 8. LLM-POWERED SUMMARIZATION ----
-
-export async function deepSummarize() {
-  const msgs = getRecentMessages(80);
-  if (msgs.length < 30) return;
-
-  // Build transcript
-  const transcript = msgs.map(m => `[${m.role === 'user' ? '用户' : '阿乐'}]: ${m.content.slice(0, 200)}`).join('\n');
-
-  // Use DeepSeek to summarize
-  try {
-    const { chat } = await import('./claude.js');
-    const prompt = `你是记忆压缩助手。根据以下对话，提取用户的关键偏好、情绪变化和重要事件。用简短中文条目回答（每条不超过20字，最多8条）：
-
-${transcript}
-
-记忆条目：`;
-
-    const result = await chat('你是一个记忆压缩助手，负责提炼用户信息。只返回简短条目，每条不超过20字。', prompt, [], 200);
-    if (result) {
-      const lines = result.split('\n').filter(l => l.trim() && l.length > 3 && l.length < 100).slice(0, 8);
-      const summary = lines.join('\n');
-      if (summary.length > 10) {
-        const prefs = getPrefs();
-        await updatePrefs({ summary: (prefs.summary || '') + '\n' + summary, lastSummaryIdx: msgs.length });
-      }
-    }
-  } catch (e) {
-    // LLM summarization failed, fall back to heuristic
-    console.log('[memory] LLM summary failed, using heuristic');
-  }
-}
