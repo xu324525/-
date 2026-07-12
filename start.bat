@@ -4,22 +4,17 @@ title 音乐老友
 cd /d "%~dp0"
 
 echo.
-echo   🎵 音乐老友 AI 桌面音乐
-echo   ─────────────────────
+echo   🎵 音乐老友
 echo.
 
-:: Start server in background
-echo   [1/2] 启动服务...
-start "音乐老友-服务" /MIN cmd /c "npm start"
+echo   [1/2] 启动后台服务...
+start "音乐老友-服务" /MIN cmd /c "node agent-server.js"
 
-:: Wait for server to be ready
 echo   [2/2] 等待服务就绪...
-:loop
-timeout /t 1 /nobreak >nul
-curl -s http://127.0.0.1:7749 >nul 2>&1
-if errorlevel 1 goto loop
+:wait
+timeout /t 2 /nobreak >nul
+powershell -Command "try { (Invoke-WebRequest http://127.0.0.1:7749/health -TimeoutSec 2).StatusCode } catch { exit 1 }" >nul 2>&1
+if errorlevel 1 goto wait
 
-:: Launch Electron
 echo   启动桌面端...
-start "" /B npm run electron
-exit
+start "音乐老友" cmd /c "npx electron ."

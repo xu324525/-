@@ -21,9 +21,13 @@ async function main() {
   await configPromise;
   const server = app.server;
 
+  // Health check — no token needed (for startup detection)
+  app.get('/health', (req, res) => res.send('ok'));
+
   // Block browser access — only Electron app can connect
   const APP_TOKEN = 'music-buddy-electron';
   app.use((req, res, next) => {
+    if (req.path === '/health') return next();
     if (req.headers['x-app-token'] === APP_TOKEN) return next();
     // Allow WebSocket upgrade (token checked in connection handler)
     if (req.headers.upgrade === 'websocket') return next();
