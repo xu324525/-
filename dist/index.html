@@ -223,7 +223,7 @@ header .dot.off{background:#555}
 </div>
 
 <script>var isPlaying=!1,accentColor='#6366f1',currentIdx=-1;
-var playlist=[],lrcLines=[],ws=null,qrTimer=null,likedIds=new Set(),chatOpen=!1,coverGen=0,audioGen=0,isLiked=!1;
+var playlist=[],lrcLines=[],ws=null,qrTimer=null,likedIds=new Set(),chatOpen=!1,coverGen=0,lrcGen=0,audioGen=0,songGen=0,isLiked=!1;
 var scrobbleTimer=null,closingWs=!1;
 
 // Pre-parsed RGB values for fast accentRGBA (avoid repeated string parsing)
@@ -281,23 +281,23 @@ function setPlayCover(song){
     }).catch(function(){cover.innerHTML='🎵'})
   }else{cover.innerHTML='🎵'}
 }
-function playCurrentSong(song){
+function playCurrentSong(song,forceGen){
   if(!song)return;
-  var gen=++audioGen;
+  var ag=++audioGen,sg=forceGen||songGen;
   if(!song.play_url&&song.id){
     status('Fetching URL...');
     fetch('/song/url?id='+song.id).then(function(r){return r.json()}).then(function(d){
-      if(gen!==audioGen)return;
-      song.play_url=d.data?.[0]?.url||'';if(song.play_url)playCurrentSong(song);else status('No URL');
+      if(ag!==audioGen||sg!==songGen)return;
+      song.play_url=d.data?.[0]?.url||'';if(song.play_url)playCurrentSong(song,sg);else status('No URL');
     }).catch(function(){status('URL fetch failed')});
     return;
   }
   if(!song.play_url){status('No play URL');return}
   currentIdx=playlist.findIndex(function(p){return p.id===song.id});if(currentIdx<0)currentIdx=0;
   audio.pause();audio.src=song.play_url;audio.load();
-  audio.play().then(function(){if(gen!==audioGen)return;isPlaying=!0;updatePlayBtn();document.getElementById('cover').classList.add('playing');status('')}).catch(function(e){status('Play err: '+e.message);console.warn('play err:',e.message)});
+  audio.play().then(function(){if(ag!==audioGen||sg!==songGen)return;isPlaying=!0;updatePlayBtn();document.getElementById('cover').classList.add('playing');status('')}).catch(function(e){status('Play err: '+e.message);console.warn('play err:',e.message)});
 }
-function playCurrent(song){playCurrentSong(song)}
+function playCurrent(song){playCurrentSong(song,songGen)}
 
 var scrobbleId=null;
 function scrobbleStart(){
@@ -337,14 +337,15 @@ function connect(){
         playlist=songs;currentIdx=0;
         if(cs){playlist[0]=cs}
         var sg=cs||playlist[0];
+        songGen++;coverGen++;
         audio.pause();audio.currentTime=0;
-        lrcLines=[];lastLrcIdx=-1;lastBase=-1;coverGen++;
+        lrcLines=[];lastLrcIdx=-1;lastBase=-1;
         document.getElementById('lyrics').innerHTML='';
         document.getElementById('songName').textContent=sg.name;
         document.getElementById('songArtist').textContent=sg.ar.join('/');
         setPlayCover(sg);
         checkLiked();
-        if(sg.play_url){loadLyrics(sg.id);playCurrentSong(sg)};
+        if(sg.play_url){loadLyrics(sg.id);playCurrentSong(sg,songGen)};
         preloadNext();
       }
       status('Got '+playlist.length+' songs');
@@ -428,7 +429,6 @@ function lerpAccent(t){var r=99,g=102,b=241;if(accentColor.startsWith('#')){var 
 
 function parseLrc(raw){var parsed=[],re=/\[(\d{2}):(\d{2})\.(\d{2,3})\](.*)/g,m;while((m=re.exec(raw))!==null){var t=parseInt(m[1])*60+parseInt(m[2])+parseInt(m[3])/(m[3].length===3?1000:100),txt=m[4].trim();if(txt)parsed.push({time:t,text:txt})}return parsed}
 
-var lrcGen=0;
 function loadLyrics(id){lrcLines=[];lastLrcIdx=-1;lastBase=-1;var g=++lrcGen;fetch('/lyric?id='+id).then(function(r){return r.json()}).then(function(d){if(g===lrcGen)renderLyrics(parseLrc(d.lrc?.lyric||''))}).catch(function(){})}
 
 var lastLrcIdx=-1,lastBase=-1;
@@ -439,7 +439,7 @@ function resetCharDelay(el){el.querySelectorAll('.c').forEach(function(c,j){c.st
 function resizePic(url,size){if(!url||!url.includes('music.126.net'))return url;var s=size||300;return url.replace(/\?.*$/,'')+'?param='+s+'y'+s}
 function setBgCover(url){if(url)document.getElementById('bgCover').style.backgroundImage='url('+resizePic(url,400)+')'}
 
-function updateUI(song,direction,autoplay){if(!song)return;prefetchSent=!1;document.getElementById('songName').textContent=song.name;document.getElementById('songArtist').textContent=song.ar.join('/');setPlayCover(song);checkLiked();if(autoplay&&song.play_url)playCurrentSong(song)}
+function updateUI(song,direction,autoplay){if(!song)return;prefetchSent=!1;songGen++;var sg=songGen;document.getElementById('songName').textContent=song.name;document.getElementById('songArtist').textContent=song.ar.join('/');setPlayCover(song);checkLiked();if(autoplay&&song.play_url)playCurrentSong(song,sg)}
 
 // Preload next song's cover in background
 var preloadImg=new Image();
