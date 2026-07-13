@@ -223,7 +223,7 @@ header .dot.off{background:#555}
 </div>
 
 <script>var isPlaying=!1,accentColor='#6366f1',currentIdx=-1;
-var playlist=[],lrcLines=[],ws=null,qrTimer=null,likedIds=new Set(),chatOpen=!1,coverGen=0,isLiked=!1;
+var playlist=[],lrcLines=[],ws=null,qrTimer=null,likedIds=new Set(),chatOpen=!1,coverGen=0,audioGen=0,isLiked=!1;
 var scrobbleTimer=null,closingWs=!1;
 
 // Pre-parsed RGB values for fast accentRGBA (avoid repeated string parsing)
@@ -283,9 +283,11 @@ function setPlayCover(song){
 }
 function playCurrentSong(song){
   if(!song)return;
+  var gen=++audioGen;
   if(!song.play_url&&song.id){
     status('Fetching URL...');
     fetch('/song/url?id='+song.id).then(function(r){return r.json()}).then(function(d){
+      if(gen!==audioGen)return;
       song.play_url=d.data?.[0]?.url||'';if(song.play_url)playCurrentSong(song);else status('No URL');
     }).catch(function(){status('URL fetch failed')});
     return;
@@ -293,7 +295,7 @@ function playCurrentSong(song){
   if(!song.play_url){status('No play URL');return}
   currentIdx=playlist.findIndex(function(p){return p.id===song.id});if(currentIdx<0)currentIdx=0;
   audio.pause();audio.src=song.play_url;audio.load();
-  audio.play().then(function(){isPlaying=!0;updatePlayBtn();document.getElementById('cover').classList.add('playing');status('')}).catch(function(e){status('Play err: '+e.message);console.warn('play err:',e.message)});
+  audio.play().then(function(){if(gen!==audioGen)return;isPlaying=!0;updatePlayBtn();document.getElementById('cover').classList.add('playing');status('')}).catch(function(e){status('Play err: '+e.message);console.warn('play err:',e.message)});
 }
 function playCurrent(song){playCurrentSong(song)}
 
@@ -368,7 +370,7 @@ audio.onloadedmetadata=function(){document.getElementById('durTime').textContent
 audio.onplay=function(){isPlaying=!0;updatePlayBtn();scrobbleStart()};
 audio.onpause=function(){isPlaying=!1;updatePlayBtn()};
 audio.onended=function(){clearInterval(scrobbleTimer);isPlaying=!1;updatePlayBtn();if(currentIdx<playlist.length-1){currentIdx++;var es=playlist[currentIdx];updateUI(es,1,es.play_url);if(es.play_url)loadLyrics(es.id);preloadNext()}else{autoContinue()}};
-audio.onerror=function(){if(!audio.src||audio.ended)return;document.getElementById("nextBtn").click()};
+audio.onerror=function(){if(!audio.src||audio.ended)return;var s=playlist[currentIdx];if(s&&!s.play_url)return;document.getElementById("nextBtn").click()};
 audio.onstalled=function(){audio.play().catch(function(){})};
 
 function autoContinue(){if(!ws||ws.readyState!==1){setTimeout(autoContinue,2000);return}ws.send(JSON.stringify({type:'chat',content:'__prefetch__'}));setTimeout(function(){if(!isPlaying&&playlist.length>0&&playlist.length-currentIdx<=2)autoContinue()},8000)}
