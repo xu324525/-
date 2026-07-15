@@ -10,11 +10,13 @@ const defaults = {
   artistStats: {},
   session: { totalPlays: 0, totalMinutes: 0 },
   // Tiered memory storage
+  playedInSession: [],       // L1: session footprint { id, name, artist } (last 20)
   prefs: {
     topArtists: [], topGenres: [], moodHistory: [],
     facts: [],               // LTM core: high-confidence facts (≤30)
     extensionFacts: [],       // LTM extension: all facts (≤500)
-    candidateFacts: [],       // Candidate pool: pending confirmation (confidence < 0.6)
+    candidateFacts: [],       // Candidate pool: scoring-based promotion
+    deprecatedFacts: [],      // Soft-deleted facts with supersedes info
     dislikes: [],             // Negative preferences: artists to avoid
     patternMatrix: {},        // { artist: { timeSlot: count } }
     summary: '',
@@ -36,6 +38,8 @@ if (!db.data.prefs.candidateFacts) db.data.prefs.candidateFacts = [];
 if (!db.data.prefs.extensionFacts) db.data.prefs.extensionFacts = [];
 if (!db.data.prefs.dislikes) db.data.prefs.dislikes = [];
 if (!db.data.prefs.patternMatrix) db.data.prefs.patternMatrix = {};
+if (!db.data.prefs.deprecatedFacts) db.data.prefs.deprecatedFacts = [];
+if (!db.data.playedInSession) db.data.playedInSession = [];
 
 // Debounced write
 let writeTimer = null;
@@ -85,6 +89,12 @@ export async function addPlay(song) {
     db.data.artistStats[artist].playCount++;
     db.data.artistStats[artist].lastPlayed = now;
   }
+
+  // Update session footprint
+  const list = db.data.playedInSession || [];
+  list.push({ id: song.id, name: song.name, artist: (song.ar || [])[0] || '' });
+  if (list.length > 20) list.shift();
+  db.data.playedInSession = list;
 
   // Update session stats
   db.data.session.totalPlays++;
@@ -148,6 +158,43 @@ export function wasPlayedRecently(songId, hours = 24) {
   const s = db.data.songStats[songId];
   if (!s) return false;
   return (Date.now() - new Date(s.lastPlayed).getTime()) < hours * 3600000;
+}
+
+// ---- Session footprint (played-in-session) ----
+
+export function addPlayedInSession(song) {
+  const list = db.data.playedInSession || [];
+  list.push({ id: song.id, name: song.name, artist: (song.ar || [])[0] || '' });
+  if (list.length > 20) list.shift();
+  db.data.playedInSession = list;
+  scheduleWrite();
+}
+
+export function getPlayedInSession(n = 5) {
+  return (db.data.playedInSession || []).slice(-n);
+}
+
+// ---- Deprecated facts (conflict versioning) ----
+
+export function getDeprecatedFacts() {
+  return db.data.prefs.deprecatedFacts || [];
+}
+
+export async function deprecateFact(factId, reason = '') {
+  const facts = db.data.prefs.facts || [];
+  const ext = db.data.prefs.extensionFacts || [];
+  const target = facts.find(f => f.id === factId) || ext.find(f => f.id === factId);
+  if (target) {
+    db.data.prefs.deprecatedFacts.push({
+      ...target,
+      deprecatedAt: new Date().toISOString(),
+      reason,
+      supersededBy: reason,
+    });
+    db.data.prefs.facts = facts.filter(f => f.id !== factId);
+    db.data.prefs.extensionFacts = ext.filter(f => f.id !== factId);
+    scheduleWrite();
+  }
 }
 
 export function getSessionStats() {

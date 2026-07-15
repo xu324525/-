@@ -21,7 +21,7 @@ import {
   getRecentMessages, getRecentPlays, getPrefs, updatePrefs,
   getTopArtistsLongTerm, getSessionStats, getPatternForSlot,
   getDislikes, addDislike, getCandidateFacts, addCandidateFact,
-  getExtensionFacts, addExtensionFact
+  getExtensionFacts, addExtensionFact, getPlayedInSession, deprecateFact
 } from '../state/db.js';
 
 const MEMORY_PATH = resolve(config.USER_DIR, 'memory.md');
@@ -69,7 +69,31 @@ function getCoreFacts() {
   return (getPrefs().facts || []).filter(f => f.confidence >= 0.3);
 }
 
-// ---- 语义检索：双字组重叠 + 置信度加权 ----
+// ---- 语义检索：双字组 + 音乐同义词扩展 + 置信度加权 ----
+
+// Music synonym map: user's casual words → musical concepts
+const MUSIC_SYNONYMS = {
+  '带劲': ['摇滚', '电子', '节奏', '嗨'],
+  '躁动': ['摇滚', '金属', '朋克', '嗨'],
+  '安静': ['民谣', '钢琴', '轻音乐', '治愈', '放松'],
+  '放松': ['轻音乐', '民谣', '爵士', '治愈', '安静'],
+  '嗨': ['电子', '摇滚', '舞曲', '派对'],
+  '丧': ['低落', 'emo', '悲伤', '后摇'],
+  '甜': ['流行', '恋爱', '少女', '可爱'],
+  '复古': ['disco', '蒸汽波', 'citypop', '经典'],
+  '唯美': ['古风', '纯音乐', '钢琴', '氛围'],
+};
+
+function expandQuery(query) {
+  const expanded = new Set([query]);
+  for (const [keyword, synonyms] of Object.entries(MUSIC_SYNONYMS)) {
+    if (query.includes(keyword)) {
+      synonyms.forEach(s => expanded.add(s));
+      expanded.add(keyword);
+    }
+  }
+  return [...expanded].join(' ');
+}
 
 function bigrams(text) {
   const set = new Set();
@@ -79,45 +103,86 @@ function bigrams(text) {
 }
 
 function semanticScore(factContent, query) {
+  // Expand query with music synonyms
+  const expandedQ = expandQuery(query);
   const fb = bigrams(factContent);
-  const qb = bigrams(query);
+  const qb = bigrams(expandedQ);
   if (qb.size === 0) return 0;
   let overlap = 0;
   for (const b of qb) { if (fb.has(b)) overlap++; }
-  // Jaccard-like: overlap / (union * 0.5 + overlap * 0.5)
   const union = new Set([...fb, ...qb]).size;
   return union > 0 ? overlap / (union * 0.3 + overlap * 0.7) : 0;
 }
 
-// ---- 候选池：待确认事实（confidence < 0.6，需 ≥2 次观察才晋升） ----
+// ---- 候选池：加权积分晋升制 ----
+// Score = mentions×1.0 + feedback×2.0 - decay×0.5
+// Promote when Score≥3.0 AND confidence≥0.65
+// Emotion-weighted: "超喜欢X" → initial confidence 0.8, one-observation promotion
 
-async function addCandidateOrPromote(category, content, confidence = 0.5) {
+async function addCandidateOrPromote(category, content, confidence = 0.5, feedbackBoost = 0) {
   const id = factId(content.slice(0, 60));
   const coreFacts = getCoreFacts();
   const inCore = coreFacts.find(f => f.id === id);
 
   if (inCore) {
-    // Already in core: boost confidence
-    inCore.confidence = Math.min(1, inCore.confidence + confidence * 0.15);
+    // Already in core: boost confidence + SM-2 review
+    inCore.last_reviewed = new Date().toISOString();
+    inCore.confidence = Math.min(1, inCore.confidence + confidence * 0.12);
     inCore.updated = new Date().toISOString();
     inCore.count = (inCore.count || 1) + 1;
+    inCore.review_count = (inCore.review_count || 0) + 1;
+    // Memory consolidation: after 3 reviews, double half-life
+    if (inCore.review_count >= 3 && !inCore.consolidated) {
+      inCore.consolidated = true;
+      inCore.half_life_mult = 2;
+    }
     await updatePrefs({ facts: coreFacts });
-    // Also add to extension for search
     await addExtensionFact(inCore);
+    return;
+  }
+
+  // Not in core → candidate pool with scoring
+  const candidates = getPrefs().candidateFacts || [];
+  const existing = candidates.find(c => c.id === id);
+  const now = new Date().toISOString();
+
+  if (existing) {
+    existing.count = (existing.count || 1) + 1;
+    existing.updated = now;
+    existing.feedback = (existing.feedback || 0) + feedbackBoost;
+    // Weighted score
+    const score = existing.count * 1.0 + existing.feedback * 2.0;
+    existing.score = score;
+
+    if (score >= 3.0 && existing.confidence >= 0.65) {
+      // Promote to core
+      coreFacts.push({ ...existing, promoted: now, last_reviewed: now, review_count: 0 });
+      if (coreFacts.length > 30) coreFacts.sort((a, b) => (b.confidence * b.count) - (a.confidence * a.count)).splice(30);
+      await updatePrefs({ facts: coreFacts });
+      await addExtensionFact(existing);
+      // Remove from candidates
+      const updatedCandidates = (getPrefs().candidateFacts || []).filter(c => c.id !== id);
+      await updatePrefs({ candidateFacts: updatedCandidates });
+      return;
+    }
+    await updatePrefs({ candidateFacts: candidates });
   } else {
-    // Not in core → candidate pool
-    await addCandidateFact({ id, category, content, confidence });
+    candidates.push({ id, category, content, confidence, count: 1, feedback: feedbackBoost, score: 1 + feedbackBoost * 2, created: now, updated: now });
+    if (candidates.length > 100) candidates.shift();
+    await updatePrefs({ candidateFacts: candidates });
   }
 }
 
-// ---- 负向偏好 ----
+// ---- 负向偏好（软删除 + 版本仲裁） ----
 
 export async function dislikeArtist(artist) {
   await addDislike(artist);
-  // Remove any positive preference facts about this artist
+  // Soft-delete: deprecate positive facts instead of hard-deleting
   const coreFacts = getCoreFacts();
-  const filtered = coreFacts.filter(f => !f.content.includes(artist) || f.category !== 'preference');
-  await updatePrefs({ facts: filtered });
+  const toDeprecate = coreFacts.filter(f => f.content.includes(artist) && f.category === 'preference');
+  for (const f of toDeprecate) {
+    await deprecateFact(f.id, `用户明确回避${artist}`);
+  }
 }
 
 // ---- SM-2 启发衰减：动态半衰期 ----
@@ -274,14 +339,13 @@ ${transcript}
 // 读取：语义搜索 + 分层上下文
 // ═══════════════════════════════════════
 
-/** 语义检索：双字组重叠 + 置信度加权 */
+/** 语义检索：双字组 + 同义词 + SM-2 复习回血 */
 export function recallMemory(query, maxResults = 5) {
   if (!query) return [];
   const coreFacts = getCoreFacts().filter(f => f.confidence >= 0.3);
   const extension = getExtensionFacts().filter(f => f.confidence >= 0.3);
   const all = [...coreFacts, ...extension];
 
-  // Dedup by id
   const seen = new Set();
   const unique = all.filter(f => { const k = f.id; if (seen.has(k)) return false; seen.add(k); return true; });
 
@@ -290,12 +354,30 @@ export function recallMemory(query, maxResults = 5) {
     score: semanticScore(f.content, query) * 10 + f.confidence * 3 + (f.count || 0) * 0.5,
   }));
 
-  // Filter out dislikes
   const dislikes = getDislikes();
-  const filtered = scored.filter(s => !dislikes.some(d => s.fact.content.includes(d)));
+  const deprecated = (getPrefs().deprecatedFacts || []).map(d => d.id);
+  const filtered = scored.filter(s => !dislikes.some(d => s.fact.content.includes(d)) && !deprecated.includes(s.fact.id));
 
-  return filtered.filter(s => s.score > 0).sort((a, b) => b.score - a.score)
+  const results = filtered.filter(s => s.score > 0).sort((a, b) => b.score - a.score)
     .slice(0, maxResults).map(s => s.fact);
+
+  // SM-2 review boost: confidence recovery on recall
+  if (results.length > 0) {
+    const coreFacts = getCoreFacts();
+    let changed = false;
+    for (const r of results) {
+      const cf = coreFacts.find(f => f.id === r.id);
+      if (cf && cf.confidence < 1) {
+        cf.confidence = Math.min(1, cf.confidence + 0.08);
+        cf.last_reviewed = new Date().toISOString();
+        cf.review_count = (cf.review_count || 0) + 1;
+        changed = true;
+      }
+    }
+    if (changed) updatePrefs({ facts: coreFacts }).catch(() => {});
+  }
+
+  return results;
 }
 
 export function getTopFacts(n = 5) {
@@ -325,7 +407,7 @@ export async function feedbackBoost(pattern, positive = true) {
     return;
   }
 
-  // Positive feedback: boost matching facts in core + extension
+  // Positive feedback: emotion-weighted initial confidence
   const coreFacts = getCoreFacts();
   let found = false;
   for (const f of coreFacts) {
@@ -333,14 +415,16 @@ export async function feedbackBoost(pattern, positive = true) {
       f.confidence = Math.min(1, f.confidence + 0.15);
       f.count = (f.count || 1) + 1;
       f.updated = new Date().toISOString();
+      f.last_reviewed = new Date().toISOString();
       found = true;
     }
   }
   if (found) {
     await updatePrefs({ facts: coreFacts });
   } else {
-    // New preference → candidate pool
-    await addCandidateOrPromote('preference', `喜欢听${pattern}`, 0.5);
+    // New preference → candidate pool with feedback boost (×2 weight)
+    const initialConf = positive ? 0.5 + 0.3 : 0.5; // feedback gives higher initial confidence
+    await addCandidateOrPromote('preference', `喜欢听${pattern}`, initialConf, 1);
   }
 
   // Contextual boost: create composite fact if mood + artist pattern detected
@@ -475,51 +559,86 @@ function getTopForCurrentSlot(n = 3) {
   return getPatternForSlot(slot, n);
 }
 
+/** 意图检测：推荐/闲聊/指令 */
+function detectIntent() {
+  const msgs = getRecentMessages(5);
+  const lastMsg = msgs.filter(m => m.role === 'user').slice(-1)[0]?.content || '';
+  if (/^(?:放|播|听|来|漫游|继续|推荐|换|切|来点|放点|播点)/.test(lastMsg)) return 'recommend';
+  if (/^(?:把|加|删|创建|导入|打开|关闭|设置|登录)/.test(lastMsg)) return 'command';
+  return 'chat';
+}
+
 export function buildMemoryContext() {
   const prefs = getPrefs();
   const parts = [];
   const dislikes = getDislikes();
+  const intent = detectIntent();
+  const deprecatedIds = new Set((prefs.deprecatedFacts || []).map(d => d.id));
 
-  // ① System prompt (角色设定在 context.js 中，这里只拼数据)
+  // Intent-aware budget routing
+  const budget = {
+    recommend: { snapshot: 0, slot: 40, facts: 30, patterns: 20, summary: 10, flow: 0 },
+    chat:      { snapshot: 10, slot: 0,  facts: 20, patterns: 0,  summary: 30, flow: 40 },
+    command:   { snapshot: 0,  slot: 0,  facts: 20, patterns: 0,  summary: 0,  flow: 70 },
+  }[intent];
 
-  // ② 长期记忆快照 — Top 5 事实 + 负向过滤 (≤300字)
+  // ② 长期记忆快照
   const snapshot = getMemorySnapshot();
-  if (snapshot && snapshot.replace(/^#.*\n?/gm, '').trim()) {
+  if (budget.snapshot > 0 && snapshot && snapshot.replace(/^#.*\n?/gm, '').trim()) {
     const lines = snapshot.split('\n').filter(l => l.trim().startsWith('-'));
     const filtered = lines.filter(l => !dislikes.some(d => l.includes(d)));
-    if (filtered.length) parts.push(`## 长期记忆\n${filtered.slice(-10).join('\n')}`);
+    if (filtered.length) {
+      const limit = intent === 'chat' ? 5 : 10;
+      parts.push(`## 长期记忆\n${filtered.slice(-limit).join('\n')}`);
+    }
   }
 
-  // ③ 当前时段场景模式 (≤200字) —— 过滤 dislikes
-  const slotArtists = getTopForCurrentSlot(10).filter(a => !dislikes.includes(a.artist)).slice(0, 3);
-  if (slotArtists.length) {
-    const slotNames = slotArtists.map(a => `${a.artist}(${a.count}次)`).join('、');
-    parts.push(`## 当前时段偏好\n${slotNames}`);
+  // ③ 当前时段偏好 (推荐意图时重点加载)
+  if (budget.slot > 0) {
+    const slotArtists = getTopForCurrentSlot(10).filter(a => !dislikes.includes(a.artist)).slice(0, intent === 'recommend' ? 4 : 2);
+    if (slotArtists.length) {
+      parts.push(`## 当前时段偏好\n${slotArtists.map(a => `${a.artist}(${a.count}次)`).join('、')}`);
+    }
   }
 
-  // ④ 高置信度 facts — 排除 dislikes (≤300字)
-  const facts = getCoreFacts().filter(f => f.confidence >= 0.5 && !dislikes.some(d => f.content.includes(d)));
-  if (facts.length > 0) {
-    parts.push(`## 用户画像\n${formatFacts(facts)}`);
+  // ④ 高置信度 facts — 排除 dislikes + deprecated
+  if (budget.facts > 0) {
+    const facts = getCoreFacts().filter(f =>
+      f.confidence >= 0.5 &&
+      !dislikes.some(d => f.content.includes(d)) &&
+      !deprecatedIds.has(f.id)
+    );
+    if (facts.length > 0) {
+      parts.push(`## 用户画像\n${formatFacts(facts)}`);
+    }
   }
 
   // ⑤ 听歌模式
-  if (prefs.patterns) {
+  if (budget.patterns > 0 && prefs.patterns) {
     parts.push(`## 听歌模式\n${prefs.patterns}`);
   }
 
-  // ⑥ 最近摘要 — 仅取最近1次
-  if (prefs.summary) {
+  // ⑥ 近期回顾
+  if (budget.summary > 0 && prefs.summary) {
     const blocks = prefs.summary.split('\n---\n');
     const recent = blocks.slice(-1)[0];
     if (recent && recent.length < 400) parts.push(`## 近期回顾\n${recent}`);
   }
 
-  // ⑦ 当前对话流 (≤5轮)
-  const recentMsgs = getRecentMessages(10);
-  if (recentMsgs.length > 1) {
-    const flow = recentMsgs.filter(m => m.role === 'user').slice(-5).map(m => m.content.slice(0, 40)).join(' → ');
-    if (flow) parts.push(`## 当前\n${flow}`);
+  // ⑦ 当前对话流
+  if (budget.flow > 0) {
+    const recentMsgs = getRecentMessages(10);
+    if (recentMsgs.length > 1) {
+      const flow = recentMsgs.filter(m => m.role === 'user').slice(-5).map(m => m.content.slice(0, 40)).join(' → ');
+      if (flow) parts.push(`## 当前\n${flow}`);
+    }
+  }
+
+  // ⑧ 会话足迹警告（所有意图都注入——防止推荐重复）
+  const played = getPlayedInSession(5);
+  if (played.length) {
+    const playedStr = played.map(p => `${p.name} - ${p.artist}`).join('、');
+    parts.push(`## 禁止重复\n最近5首已播放: ${playedStr}\n推荐时必须排除，优先推荐同歌手的不同歌曲。`);
   }
 
   const ctx = parts.join('\n\n');
