@@ -220,6 +220,50 @@ async function extractFacts() {
   }
 }
 
+// ---- LLM-powered extraction: deep analysis of conversation ----
+
+async function extractFactsLLM() {
+  const messages = getRecentMessages(50);
+  if (messages.length < 25) return;
+  // Only run if we haven't run in the last 30 messages
+  const prefs = getPrefs();
+  const lastLLMExtract = prefs.lastLLMExtractIdx || 0;
+  if (messages.length - lastLLMExtract < 30) return;
+
+  try {
+    const { askLLM } = await import('./llm.js');
+    const recent = messages.slice(-30);
+    const transcript = recent.map(m => `[${m.role === 'user' ? '用户' : '阿乐'}]: ${m.content.slice(0, 150)}`).join('\n');
+    const prompt = `分析这段音乐对话，提取用户的关键信息。返回 JSON 数组，每条包含 category(偏好/preference, 情绪/mood, 习惯/user_habit, 事件/event), content(简短中文, ≤15字), confidence(0.3-0.9)。
+
+${transcript}
+
+[{"category":"`;
+
+    const raw = await askLLM('你是用户画像分析师。只返回 JSON。', prompt, [], 200);
+    if (!raw) return;
+
+    // Parse: [{"category":"mood","content":"用户感到疲惫","confidence":0.7},...]
+    const jsonStr = '{"category":"' + (raw.includes('{"category"') ? raw.split('{"category"').slice(1).join('{"category"') : '');
+    try {
+      const facts = JSON.parse('[' + jsonStr + ']');
+      if (Array.isArray(facts)) {
+        for (const f of facts) {
+          if (f.category && f.content && f.confidence) {
+            await addFact(f.category, f.content.slice(0, 40), Math.min(0.9, f.confidence));
+          }
+        }
+        await updatePrefs({ lastLLMExtractIdx: messages.length });
+      }
+    } catch {
+      // JSON parse failed, fall back to heuristic — already done
+    }
+  } catch (e) {
+    // LLM unavailable, no problem
+    console.log('[memory] LLM extraction skipped:', e.message);
+  }
+}
+
 // ═══════════════════════════════════════════
 // 读取：按相关性分层检索
 // ═══════════════════════════════════════════
@@ -284,6 +328,7 @@ export async function maybeSummarize(force = false) {
   if (!force && newMsgs.length < 30) return;
 
   await extractFacts();
+  extractFactsLLM().catch(() => {}); // fire-and-forget, don't block summarization
   decayFacts();
   consolidateFacts();
 
@@ -419,14 +464,16 @@ export function getSessionTopic() {
   if (!userMsgs.length) return '';
 
   const topicPatterns = [
-    { re: /加班|工作|上班|忙|累|压力|996/i, topic: '工作压力' },
-    { re: /考试|复习|学习|背书|刷题/i, topic: '备考学习' },
-    { re: /失恋|分手|难过|伤心|想哭|emo/i, topic: '情绪低落' },
-    { re: /运动|跑步|健身|举铁|gym/i, topic: '运动' },
-    { re: /睡前|睡觉|失眠|躺/i, topic: '睡前放松' },
-    { re: /开车|通勤|路上|地铁/i, topic: '通勤路上' },
-    { re: /聚会|派对|喝酒|party|嗨/i, topic: '聚会' },
-    { re: /下雨|雨天|雨声/i, topic: '下雨天' },
+    { re: /加班|工作|上班|忙|压力|996/i, topic: '工作压力', mood: '紧绷的' },
+    { re: /考试|复习|学习|背书|刷题/i, topic: '备考学习', mood: '专注的' },
+    { re: /失恋|分手|难过|伤心|想哭|emo/i, topic: '情绪低落', mood: '低落的' },
+    { re: /运动|跑步|健身|举铁|gym/i, topic: '运动', mood: '充满活力的' },
+    { re: /睡前|睡觉|失眠|躺/i, topic: '睡前放松', mood: '疲惫的' },
+    { re: /开车|通勤|路上|地铁/i, topic: '通勤路上', mood: '放空的' },
+    { re: /聚会|派对|喝酒|party|嗨/i, topic: '聚会', mood: '兴奋的' },
+    { re: /下雨|雨天|雨声/i, topic: '下雨天', mood: '安静的' },
+    { re: /无聊|没劲|没意思/i, topic: '无聊', mood: '无聊的' },
+    { re: /开心|高兴|爽|nice|哈哈|快乐/i, topic: '心情不错', mood: '开心的' },
   ];
   for (const m of userMsgs) {
     for (const { re, topic } of topicPatterns) {
@@ -434,8 +481,32 @@ export function getSessionTopic() {
     }
   }
 
+  // Fall back to stored mood facts
   const moods = getFacts().filter(f => f.category === 'mood' && f.confidence >= 0.4);
   if (moods.length) return moods.slice(-1)[0].content;
 
+  return '';
+}
+
+/** Get detected emotional state for context injection */
+export function getEmotionalContext() {
+  const msgs = getRecentMessages(10);
+  const userMsgs = msgs.filter(m => m.role === 'user').slice(-4);
+  if (!userMsgs.length) return '';
+
+  const moodPatterns = [
+    { re: /累|疲惫|困|乏|没精神/i, label: '疲惫' },
+    { re: /烦|躁|不爽|生气|火大/i, label: '烦躁' },
+    { re: /难过|伤心|哭|emo|低落|down/i, label: '低落' },
+    { re: /开心|高兴|爽|哈哈|快乐|nice/i, label: '开心' },
+    { re: /焦虑|紧张|慌|担心|怕/i, label: '焦虑' },
+    { re: /无聊|没劲|没意思/i, label: '无聊' },
+    { re: /安静|平静|放松|舒服/i, label: '平静' },
+  ];
+  for (const m of userMsgs) {
+    for (const { re, label } of moodPatterns) {
+      if (re.test(m.content)) return label;
+    }
+  }
   return '';
 }

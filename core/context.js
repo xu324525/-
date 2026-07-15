@@ -2,7 +2,7 @@ import { readFileSync, existsSync } from 'fs';
 import { resolve } from 'path';
 import config from '../config.js';
 import { getRecentMessages, getRecentPlays, getPrefs, getTopArtistsLongTerm, getSessionStats } from '../state/db.js';
-import { buildMemoryContext, getSessionTopic, recallMemory } from './memory.js';
+import { buildMemoryContext, getSessionTopic, recallMemory, getEmotionalContext } from './memory.js';
 
 function readUserFile(name) {
   const p = resolve(config.USER_DIR, name);
@@ -53,11 +53,14 @@ ${taste ? '用户自述口味：' + taste.slice(0,200) : ''}
 
 ${(() => {
   const topic = getSessionTopic();
+  const emotion = getEmotionalContext();
+  const parts = [];
+  if (emotion) parts.push(`用户情绪: ${emotion}`);
   if (topic) {
     const relevant = recallMemory(topic, 3);
-    if (relevant.length) return `## 相关记忆\n${relevant.map(f => f.content).join('；')}`;
+    if (relevant.length) parts.push(`相关记忆: ${relevant.map(f => f.content).join('；')}`);
   }
-  return '';
+  return parts.length ? `## 当前感知\n${parts.join('\n')}` : '';
 })()}
 
 ${buildMemoryContext()}
@@ -76,7 +79,7 @@ ${(() => {
 
 最近播放过：${recentTracks || '暂无记录'}
 
-你主动管理记忆，发现重要信息就用remember字段记录下来。别啰嗦，自然点。`;
+你主动管理记忆，发现重要信息就用remember字段记录。根据当前时段和用户情绪，偶尔主动问问ta想不想听点合适的——但别太频繁，自然点。别啰嗦。`;
   _promptCache.time = Date.now();
   return _promptCache.value;
 }
