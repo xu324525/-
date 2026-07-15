@@ -80,7 +80,7 @@ async function addFact(category, content, confidence = 0.5) {
 
   if (existing) {
     existing.content = content;
-    existing.confidence = Math.min(1, existing.confidence + confidence * 0.3);
+    existing.confidence = Math.min(1, existing.confidence + confidence * 0.15);
     existing.updated = now;
     existing.count = (existing.count || 1) + 1;
   } else {
@@ -98,10 +98,16 @@ export async function feedbackBoost(pattern, positive = true) {
   let changed = false;
   for (const f of facts) {
     if (f.content.includes(pattern) || pattern.includes(f.content.slice(0, 20))) {
-      f.confidence = Math.min(1, f.confidence + (positive ? 0.15 : -0.15));
+      f.confidence = Math.min(1, Math.max(0.1, f.confidence + (positive ? 0.15 : -0.15)));
       f.updated = new Date().toISOString();
       changed = true;
     }
+  }
+  // If positive feedback for new artist/genre, create a fact
+  if (positive && !changed) {
+    await addFact('preference', `喜欢听${pattern}`, 0.5);
+    console.log('[memory] new fact from feedback:', pattern);
+    return;
   }
   if (changed) {
     prefs.facts = facts.filter(f => f.confidence >= 0.3);
