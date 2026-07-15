@@ -11,6 +11,8 @@ const defaults = {
   session: { totalPlays: 0, totalMinutes: 0 },
   // Tiered memory storage
   playedInSession: [],       // L1: session footprint { id, name, artist } (last 20)
+  emotionTrajectory: [],     // L1: emotional flow [{ valence, time }] valence∈[-1,1]
+  transitions: {},           // L2: Markov chain { artistA: { artistB: count } }
   prefs: {
     topArtists: [], topGenres: [], moodHistory: [],
     facts: [],               // LTM core: high-confidence facts (≤30)
@@ -40,6 +42,8 @@ if (!db.data.prefs.dislikes) db.data.prefs.dislikes = [];
 if (!db.data.prefs.patternMatrix) db.data.prefs.patternMatrix = {};
 if (!db.data.prefs.deprecatedFacts) db.data.prefs.deprecatedFacts = [];
 if (!db.data.playedInSession) db.data.playedInSession = [];
+if (!db.data.emotionTrajectory) db.data.emotionTrajectory = [];
+if (!db.data.transitions) db.data.transitions = {};
 
 // Debounced write
 let writeTimer = null;
@@ -106,6 +110,16 @@ export async function addPlay(song) {
     const slot = h < 6 ? 'night' : h < 9 ? 'morning' : h < 14 ? 'noon' : h < 18 ? 'afternoon' : h < 22 ? 'evening' : 'night';
     if (!db.data.prefs.patternMatrix[artist]) db.data.prefs.patternMatrix[artist] = {};
     db.data.prefs.patternMatrix[artist][slot] = (db.data.prefs.patternMatrix[artist][slot] || 0) + 1;
+
+    // Update Markov transition matrix (use second-to-last = previous song)
+    const played = db.data.playedInSession || [];
+    if (played.length >= 2) {
+      const prev = played[played.length - 2];
+      if (prev.artist && prev.artist !== artist) {
+        if (!db.data.transitions[prev.artist]) db.data.transitions[prev.artist] = {};
+        db.data.transitions[prev.artist][artist] = (db.data.transitions[prev.artist][artist] || 0) + 1;
+      }
+    }
   }
 
   scheduleWrite();
@@ -199,6 +213,35 @@ export async function deprecateFact(factId, reason = '') {
 
 export function getSessionStats() {
   return { ...db.data.session };
+}
+
+// ---- Markov transition matrix ----
+
+export function getNextArtist(currentArtist, n = 3) {
+  const trans = db.data.transitions || {};
+  const next = trans[currentArtist] || {};
+  return Object.entries(next).sort((a, b) => b[1] - a[1]).slice(0, n).map(([artist, count]) => ({ artist, count }));
+}
+
+// ---- Emotion trajectory ----
+
+export function addEmotionPoint(valence) {
+  const traj = db.data.emotionTrajectory || [];
+  traj.push({ valence, time: new Date().toISOString() });
+  if (traj.length > 20) traj.shift();
+  db.data.emotionTrajectory = traj;
+  scheduleWrite();
+}
+
+export function getEmotionTrajectory(n = 5) {
+  return (db.data.emotionTrajectory || []).slice(-n);
+}
+
+export function isEmotionDropping() {
+  const traj = db.data.emotionTrajectory || [];
+  if (traj.length < 3) return false;
+  const last3 = traj.slice(-3).map(t => t.valence);
+  return last3[0] > last3[1] && last3[1] > last3[2];
 }
 
 // Get pattern matrix for a specific time slot

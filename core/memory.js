@@ -21,7 +21,8 @@ import {
   getRecentMessages, getRecentPlays, getPrefs, updatePrefs,
   getTopArtistsLongTerm, getSessionStats, getPatternForSlot,
   getDislikes, addDislike, getCandidateFacts, addCandidateFact,
-  getExtensionFacts, addExtensionFact, getPlayedInSession, deprecateFact
+  getExtensionFacts, addExtensionFact, getPlayedInSession, deprecateFact,
+  getNextArtist, addEmotionPoint, getEmotionTrajectory, isEmotionDropping
 } from '../state/db.js';
 
 const MEMORY_PATH = resolve(config.USER_DIR, 'memory.md');
@@ -69,31 +70,17 @@ function getCoreFacts() {
   return (getPrefs().facts || []).filter(f => f.confidence >= 0.3);
 }
 
-// ---- 语义检索：双字组 + 音乐同义词扩展 + 置信度加权 ----
+// ---- 语义检索：词频向量 + 双字组混合 ----
+//   Path 1: TF-IDF-like bag-of-words cosine similarity (primary)
+//   Path 2: Bigram overlap with hardcoded synonym fallback (when TF score < 0.3)
 
-// Music synonym map: user's casual words → musical concepts
-const MUSIC_SYNONYMS = {
-  '带劲': ['摇滚', '电子', '节奏', '嗨'],
-  '躁动': ['摇滚', '金属', '朋克', '嗨'],
-  '安静': ['民谣', '钢琴', '轻音乐', '治愈', '放松'],
-  '放松': ['轻音乐', '民谣', '爵士', '治愈', '安静'],
-  '嗨': ['电子', '摇滚', '舞曲', '派对'],
-  '丧': ['低落', 'emo', '悲伤', '后摇'],
-  '甜': ['流行', '恋爱', '少女', '可爱'],
-  '复古': ['disco', '蒸汽波', 'citypop', '经典'],
+const SYNONYM_FALLBACK = {
+  '带劲': ['摇滚', '电子', '节奏', '嗨'], '躁动': ['摇滚', '金属', '朋克'],
+  '安静': ['民谣', '钢琴', '轻音乐', '治愈'], '放松': ['轻音乐', '爵士', '治愈'],
+  '嗨': ['电子', '摇滚', '舞曲'], '丧': ['低落', 'emo', '后摇'],
+  '甜': ['流行', '恋爱', '少女'], '复古': ['disco', '蒸汽波', 'citypop'],
   '唯美': ['古风', '纯音乐', '钢琴', '氛围'],
 };
-
-function expandQuery(query) {
-  const expanded = new Set([query]);
-  for (const [keyword, synonyms] of Object.entries(MUSIC_SYNONYMS)) {
-    if (query.includes(keyword)) {
-      synonyms.forEach(s => expanded.add(s));
-      expanded.add(keyword);
-    }
-  }
-  return [...expanded].join(' ');
-}
 
 function bigrams(text) {
   const set = new Set();
@@ -102,16 +89,40 @@ function bigrams(text) {
   return set;
 }
 
+function tfVector(text) {
+  const words = text.toLowerCase().replace(/[，。！？、；：""''【】《》\s]/g, ' ').split(/\s+/).filter(w => w.length > 0);
+  const tf = {};
+  for (const w of words) tf[w] = (tf[w] || 0) + 1;
+  return tf;
+}
+
+function cosineTF(tf1, tf2) {
+  const keys = new Set([...Object.keys(tf1), ...Object.keys(tf2)]);
+  let dot = 0, mag1 = 0, mag2 = 0;
+  for (const k of keys) { dot += (tf1[k] || 0) * (tf2[k] || 0); mag1 += (tf1[k] || 0) ** 2; mag2 += (tf2[k] || 0) ** 2; }
+  return (mag1 > 0 && mag2 > 0) ? dot / (Math.sqrt(mag1) * Math.sqrt(mag2)) : 0;
+}
+
 function semanticScore(factContent, query) {
-  // Expand query with music synonyms
-  const expandedQ = expandQuery(query);
+  // Primary: TF cosine similarity
+  const tfScore = cosineTF(tfVector(factContent), tfVector(query));
+
+  // Secondary: bigram overlap (with synonym fallback)
+  let synonymQ = query;
+  for (const [kw, syns] of Object.entries(SYNONYM_FALLBACK)) {
+    if (query.includes(kw)) synonymQ += ' ' + syns.join(' ');
+  }
   const fb = bigrams(factContent);
-  const qb = bigrams(expandedQ);
-  if (qb.size === 0) return 0;
+  const qb = bigrams(synonymQ);
+  if (qb.size === 0) return tfScore;
   let overlap = 0;
   for (const b of qb) { if (fb.has(b)) overlap++; }
   const union = new Set([...fb, ...qb]).size;
-  return union > 0 ? overlap / (union * 0.3 + overlap * 0.7) : 0;
+  const bgScore = union > 0 ? overlap / (union * 0.3 + overlap * 0.7) : 0;
+
+  // Blend: TF primary (0.6), bigram secondary (0.4), but if TF is too low, rely more on bigram
+  const tfWeight = tfScore > 0.3 ? 0.6 : 0.2;
+  return tfScore * tfWeight + bgScore * (1 - tfWeight);
 }
 
 // ---- 候选池：加权积分晋升制 ----
@@ -154,7 +165,12 @@ async function addCandidateOrPromote(category, content, confidence = 0.5, feedba
     const score = existing.count * 1.0 + existing.feedback * 2.0;
     existing.score = score;
 
-    if (score >= 3.0 && existing.confidence >= 0.65) {
+    // Time discount: score decays as fact ages
+    const daysOld = (Date.now() - new Date(existing.created).getTime()) / (1000 * 86400);
+    const timeDiscount = Math.exp(-0.01 * daysOld);
+    existing.score = score * timeDiscount;
+
+    if (existing.score >= 3.0 && existing.confidence >= 0.65) {
       // Promote to core
       coreFacts.push({ ...existing, promoted: now, last_reviewed: now, review_count: 0 });
       if (coreFacts.length > 30) coreFacts.sort((a, b) => (b.confidence * b.count) - (a.confidence * a.count)).splice(30);
@@ -261,7 +277,13 @@ async function extractFacts() {
 
   for (const m of userMsgs) {
     for (const { re, cat, fact, conf } of moodMap) {
-      if (re.test(m.content)) facts.push({ cat, fact, conf });
+      if (re.test(m.content)) {
+        facts.push({ cat, fact, conf });
+        // Feed emotion trajectory: map mood to valence
+        const valenceMap = { '疲惫': -0.3, '烦躁': -0.6, '低落': -0.7, '开心': 0.7, '焦虑': -0.5, '平静': 0.2 };
+        const val = valenceMap[fact.replace('用户', '').replace(/[感到的，。]/g, '').split('/')[0]] || 0;
+        addEmotionPoint(val);
+      }
     }
   }
 
@@ -402,7 +424,18 @@ export async function feedbackBoost(pattern, positive = true) {
   const timeLabels = { morning: '早上', noon: '中午', afternoon: '下午', evening: '晚上', night: '深夜' };
 
   if (!positive) {
-    // Negative: add to dislikes instead of penalizing preference
+    // Cut-penalty: penalize facts that led to this skip
+    const coreFacts = getCoreFacts();
+    let changed = false;
+    for (const f of coreFacts) {
+      if (f.content.includes(pattern)) {
+        f.confidence = Math.max(0.3, f.confidence - 0.05);
+        f.updated = new Date().toISOString();
+        changed = true;
+      }
+    }
+    if (changed) await updatePrefs({ facts: coreFacts });
+    // Also add to dislikes as safety net
     await addDislike(pattern);
     return;
   }
@@ -559,12 +592,35 @@ function getTopForCurrentSlot(n = 3) {
   return getPatternForSlot(slot, n);
 }
 
-/** 意图检测：推荐/闲聊/指令 */
+// ---- Attribution trace (developer observability) ----
+
+export function getAttributionTrace() {
+  const trace = [];
+  const slot = ['night', 'morning', 'noon', 'afternoon', 'evening', 'night'][Math.floor(new Date().getHours() / 4)];
+  const slotTop = getPatternForSlot(slot, 3);
+  if (slotTop.length) trace.push(`路由: 时段${slot}→${slotTop.map(a => a.artist).join('/')}`);
+  const played = getPlayedInSession(1);
+  if (played.length) {
+    const next = getNextArtist(played[0].artist, 3);
+    if (next.length) trace.push(`转移: ${played[0].artist}→${next.map(n => n.artist + '(' + n.count + ')').join('/')}`);
+  }
+  const topF = getTopFacts(3);
+  if (topF.length) trace.push(`核心: ${topF.join(' | ')}`);
+  const traj = getEmotionTrajectory(3);
+  if (traj.length) trace.push(`情绪轨迹: ${traj.map(t => t.valence.toFixed(1)).join('→')}`);
+  const dropping = isEmotionDropping();
+  if (dropping) trace.push('⚠ 情绪下降→自动切换治愈模式');
+  return trace.join(' | ');
+}
+
+/** 意图检测 + 情绪轨迹干预 */
 function detectIntent() {
   const msgs = getRecentMessages(5);
   const lastMsg = msgs.filter(m => m.role === 'user').slice(-1)[0]?.content || '';
   if (/^(?:放|播|听|来|漫游|继续|推荐|换|切|来点|放点|播点)/.test(lastMsg)) return 'recommend';
   if (/^(?:把|加|删|创建|导入|打开|关闭|设置|登录)/.test(lastMsg)) return 'command';
+  // Emotion trajectory intervention: if dropping, switch to recommend with calm bias
+  if (isEmotionDropping()) return 'recommend_calm';
   return 'chat';
 }
 
@@ -577,10 +633,11 @@ export function buildMemoryContext() {
 
   // Intent-aware budget routing
   const budget = {
-    recommend: { snapshot: 0, slot: 40, facts: 30, patterns: 20, summary: 10, flow: 0 },
-    chat:      { snapshot: 10, slot: 0,  facts: 20, patterns: 0,  summary: 30, flow: 40 },
-    command:   { snapshot: 0,  slot: 0,  facts: 20, patterns: 0,  summary: 0,  flow: 70 },
-  }[intent];
+    recommend:      { snapshot: 0, slot: 40, facts: 30, patterns: 20, summary: 10, flow: 0 },
+    recommend_calm: { snapshot: 0, slot: 20, facts: 40, patterns: 10, summary: 20, flow: 10 },
+    chat:           { snapshot: 10, slot: 0,  facts: 20, patterns: 0,  summary: 30, flow: 40 },
+    command:        { snapshot: 0,  slot: 0,  facts: 20, patterns: 0,  summary: 0,  flow: 70 },
+  }[intent] || { snapshot: 0, slot: 0, facts: 30, patterns: 0, summary: 0, flow: 70 };
 
   // ② 长期记忆快照
   const snapshot = getMemorySnapshot();
@@ -634,11 +691,26 @@ export function buildMemoryContext() {
     }
   }
 
-  // ⑧ 会话足迹警告（所有意图都注入——防止推荐重复）
+  // ⑧ 会话足迹警告
   const played = getPlayedInSession(5);
   if (played.length) {
     const playedStr = played.map(p => `${p.name} - ${p.artist}`).join('、');
     parts.push(`## 禁止重复\n最近5首已播放: ${playedStr}\n推荐时必须排除，优先推荐同歌手的不同歌曲。`);
+  }
+
+  // ⑨ 马尔可夫序列推荐规则（仅推荐意图）
+  if (intent.startsWith('recommend') && played.length) {
+    const lastArtist = played[played.length - 1].artist;
+    const next = getNextArtist(lastArtist, 3);
+    if (next.length) {
+      const rule = next.map(n => `${n.artist}(${Math.round(n.count / Math.max(...next.map(x=>x.count)) * 100)}%)`).join('、');
+      parts.push(`## 序列规则\n${lastArtist}后常接: ${rule}`);
+    }
+  }
+
+  // ⑩ 情绪轨迹干预（情绪下降时）
+  if (intent === 'recommend_calm') {
+    parts.push(`## 情绪干预\n检测到情绪连续下降，优先推荐平静/治愈类音乐`);
   }
 
   const ctx = parts.join('\n\n');
