@@ -13,6 +13,8 @@ const defaults = {
   playedInSession: [],       // L1: session footprint { id, name, artist } (last 20)
   emotionTrajectory: [],     // L1: emotional flow [{ valence, time }] valence∈[-1,1]
   transitions: {},           // L2: Markov chain { artistA: { artistB: count } }
+  termDF: {},                // L2: Document frequency for BM25 { term: count_of_docs_containing }
+  cutHistory: [],            // L2: Per-song cut tracking [{songId, artist, time}]
   prefs: {
     topArtists: [], topGenres: [], moodHistory: [],
     facts: [],               // LTM core: high-confidence facts (≤30)
@@ -44,6 +46,8 @@ if (!db.data.prefs.deprecatedFacts) db.data.prefs.deprecatedFacts = [];
 if (!db.data.playedInSession) db.data.playedInSession = [];
 if (!db.data.emotionTrajectory) db.data.emotionTrajectory = [];
 if (!db.data.transitions) db.data.transitions = {};
+if (!db.data.termDF) db.data.termDF = {};
+if (!db.data.cutHistory) db.data.cutHistory = [];
 
 // Debounced write
 let writeTimer = null;
@@ -215,12 +219,40 @@ export function getSessionStats() {
   return { ...db.data.session };
 }
 
-// ---- Markov transition matrix ----
+// ---- Markov transition matrix (Laplace + global decay) ----
+
+export function decayTransitions(factor = 0.995) {
+  const trans = db.data.transitions || {};
+  for (const [from, targets] of Object.entries(trans))
+    for (const to of Object.keys(targets))
+      trans[from][to] = Math.max(1, Math.round(trans[from][to] * factor));
+  scheduleWrite();
+}
+decayTransitions();
 
 export function getNextArtist(currentArtist, n = 3) {
   const trans = db.data.transitions || {};
   const next = trans[currentArtist] || {};
-  return Object.entries(next).sort((a, b) => b[1] - a[1]).slice(0, n).map(([artist, count]) => ({ artist, count }));
+  const allA = new Set(Object.keys(trans));
+  const smoothed = {};
+  for (const a of allA) if (a !== currentArtist) smoothed[a] = (next[a] || 0) + 1;
+  for (const [a, c] of Object.entries(next)) smoothed[a] = Math.max(smoothed[a] || 0, c);
+  return Object.entries(smoothed).sort((a, b) => b[1] - a[1]).slice(0, n).map(([a, c]) => ({ artist: a, count: c }));
+}
+
+// ---- Cut history (two-level penalty) ----
+
+export function addCutRecord(songId, artist) {
+  const h = db.data.cutHistory || [];
+  h.push({ songId, artist, time: new Date().toISOString() });
+  if (h.length > 50) h.shift();
+  db.data.cutHistory = h;
+  scheduleWrite();
+}
+
+export function shouldPenalizeArtist(artist) {
+  const recent = (db.data.cutHistory || []).slice(-10).filter(c => c.artist === artist);
+  return new Set(recent.map(c => c.songId)).size >= 2;
 }
 
 // ---- Emotion trajectory ----
@@ -240,9 +272,25 @@ export function getEmotionTrajectory(n = 5) {
 export function isEmotionDropping() {
   const traj = db.data.emotionTrajectory || [];
   if (traj.length < 3) return false;
-  const last3 = traj.slice(-3).map(t => t.valence);
-  return last3[0] > last3[1] && last3[1] > last3[2];
+  const last3 = traj.slice(-3);
+  const vals = last3.map(t => t.valence);
+  if (!(vals[0] > vals[1] && vals[1] > vals[2])) return false;
+  if (Math.abs(vals[2] - vals[0]) < 0.3) return false;
+  const dur = (new Date(last3[2].time).getTime() - new Date(last3[0].time).getTime()) / 60000;
+  return dur >= 5;
 }
+
+// ---- BM25 document frequency ----
+
+export function updateBM25DF(factContent) {
+  const words = new Set(factContent.toLowerCase().replace(/[，。！？、；：""''【】《》\s]/g, ' ').split(/\s+/).filter(w => w.length > 0));
+  const df = db.data.termDF || {};
+  for (const w of words) df[w] = (df[w] || 0) + 1;
+  db.data.termDF = df;
+}
+
+export function getTermDF() { return db.data.termDF || {}; }
+export function getTotalDocCount() { return (db.data.prefs?.facts?.length || 0) + (db.data.prefs?.extensionFacts?.length || 0) + 1; }
 
 // Get pattern matrix for a specific time slot
 export function getPatternForSlot(slot, n = 5) {
@@ -314,6 +362,8 @@ export async function addExtensionFact(fact) {
   } else {
     ext.push({ ...fact, created: new Date().toISOString(), updated: new Date().toISOString() });
     if (ext.length > 500) ext.sort((a, b) => (b.confidence * b.count) - (a.confidence * a.count)).splice(500);
+    // Update BM25 document frequency for new fact
+    updateBM25DF(fact.content);
   }
   db.data.prefs.extensionFacts = ext;
   scheduleWrite();

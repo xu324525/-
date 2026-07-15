@@ -22,7 +22,9 @@ import {
   getTopArtistsLongTerm, getSessionStats, getPatternForSlot,
   getDislikes, addDislike, getCandidateFacts, addCandidateFact,
   getExtensionFacts, addExtensionFact, getPlayedInSession, deprecateFact,
-  getNextArtist, addEmotionPoint, getEmotionTrajectory, isEmotionDropping
+  getNextArtist, addEmotionPoint, getEmotionTrajectory, isEmotionDropping,
+  updateBM25DF, getTermDF, getTotalDocCount,
+  addCutRecord, shouldPenalizeArtist
 } from '../state/db.js';
 
 const MEMORY_PATH = resolve(config.USER_DIR, 'memory.md');
@@ -89,40 +91,52 @@ function bigrams(text) {
   return set;
 }
 
-function tfVector(text) {
-  const words = text.toLowerCase().replace(/[，。！？、；：""''【】《》\s]/g, ' ').split(/\s+/).filter(w => w.length > 0);
-  const tf = {};
-  for (const w of words) tf[w] = (tf[w] || 0) + 1;
-  return tf;
+// ---- BM25 scoring (k1=1.5, b=0.75) ----
+
+function tokenize(text) {
+  return text.toLowerCase().replace(/[，。！？、；：""''【】《》\s]/g, ' ').split(/\s+/).filter(w => w.length > 0);
 }
 
-function cosineTF(tf1, tf2) {
-  const keys = new Set([...Object.keys(tf1), ...Object.keys(tf2)]);
-  let dot = 0, mag1 = 0, mag2 = 0;
-  for (const k of keys) { dot += (tf1[k] || 0) * (tf2[k] || 0); mag1 += (tf1[k] || 0) ** 2; mag2 += (tf2[k] || 0) ** 2; }
-  return (mag1 > 0 && mag2 > 0) ? dot / (Math.sqrt(mag1) * Math.sqrt(mag2)) : 0;
+function bm25Score(factContent, query) {
+  const docTerms = tokenize(factContent);
+  const queryTerms = tokenize(query);
+  if (!docTerms.length || !queryTerms.length) return 0;
+
+  const df = getTermDF();
+  const N = getTotalDocCount();
+  const docLen = docTerms.length;
+  const avgLen = Math.max(1, N > 0 ? docLen : docLen); // simplified avg
+  const k1 = 1.5, b = 0.75;
+
+  let score = 0;
+  for (const qt of queryTerms) {
+    const n = df[qt] || 0;
+    if (n === 0) continue;
+    const idf = Math.log(1 + (N - n + 0.5) / (n + 0.5));
+    const tf = docTerms.filter(t => t === qt).length;
+    score += idf * (tf * (k1 + 1)) / (tf + k1 * (1 - b + b * docLen / avgLen));
+  }
+  return score;
 }
 
 function semanticScore(factContent, query) {
-  // Primary: TF cosine similarity
-  const tfScore = cosineTF(tfVector(factContent), tfVector(query));
+  // Primary: BM25
+  const bm25 = bm25Score(factContent, query);
 
-  // Secondary: bigram overlap (with synonym fallback)
+  // Secondary: bigram with synonym fallback
   let synonymQ = query;
-  for (const [kw, syns] of Object.entries(SYNONYM_FALLBACK)) {
+  for (const [kw, syns] of Object.entries(SYNONYM_FALLBACK))
     if (query.includes(kw)) synonymQ += ' ' + syns.join(' ');
-  }
-  const fb = bigrams(factContent);
-  const qb = bigrams(synonymQ);
-  if (qb.size === 0) return tfScore;
+  const fb = bigrams(factContent), qb = bigrams(synonymQ);
+  if (qb.size === 0) return bm25;
   let overlap = 0;
-  for (const b of qb) { if (fb.has(b)) overlap++; }
+  for (const b of qb) if (fb.has(b)) overlap++;
   const union = new Set([...fb, ...qb]).size;
   const bgScore = union > 0 ? overlap / (union * 0.3 + overlap * 0.7) : 0;
 
-  // Blend: TF primary (0.6), bigram secondary (0.4), but if TF is too low, rely more on bigram
-  const tfWeight = tfScore > 0.3 ? 0.6 : 0.2;
-  return tfScore * tfWeight + bgScore * (1 - tfWeight);
+  // Blend: BM25 primary (0.7), bigram secondary (0.3)
+  const bm25Weight = bm25 > 0.2 ? 0.7 : 0.2;
+  return bm25 * bm25Weight + bgScore * (1 - bm25Weight);
 }
 
 // ---- 候选池：加权积分晋升制 ----
@@ -138,7 +152,13 @@ async function addCandidateOrPromote(category, content, confidence = 0.5, feedba
   if (inCore) {
     // Already in core: boost confidence + SM-2 review
     inCore.last_reviewed = new Date().toISOString();
-    inCore.confidence = Math.min(1, inCore.confidence + confidence * 0.12);
+    // SlotBoost: time-slot relevance bonus
+    const h = new Date().getHours();
+    const currentSlot = h < 6 ? 'night' : h < 9 ? 'morning' : h < 14 ? 'noon' : h < 18 ? 'afternoon' : h < 22 ? 'evening' : 'night';
+    const slotBoost = (inCore.slot === currentSlot) ? 1.5 : 1.0;
+
+    inCore.confidence = Math.min(1, inCore.confidence + confidence * 0.12 * slotBoost);
+    inCore.slot = currentSlot;
     inCore.updated = new Date().toISOString();
     inCore.count = (inCore.count || 1) + 1;
     inCore.review_count = (inCore.review_count || 0) + 1;
@@ -183,7 +203,9 @@ async function addCandidateOrPromote(category, content, confidence = 0.5, feedba
     }
     await updatePrefs({ candidateFacts: candidates });
   } else {
-    candidates.push({ id, category, content, confidence, count: 1, feedback: feedbackBoost, score: 1 + feedbackBoost * 2, created: now, updated: now });
+    const h = new Date().getHours();
+    const currentSlot = h < 6 ? 'night' : h < 9 ? 'morning' : h < 14 ? 'noon' : h < 18 ? 'afternoon' : h < 22 ? 'evening' : 'night';
+    candidates.push({ id, category, content, confidence, count: 1, feedback: feedbackBoost, score: 1 + feedbackBoost * 2, slot: currentSlot, created: now, updated: now });
     if (candidates.length > 100) candidates.shift();
     await updatePrefs({ candidateFacts: candidates });
   }
@@ -424,19 +446,25 @@ export async function feedbackBoost(pattern, positive = true) {
   const timeLabels = { morning: '早上', noon: '中午', afternoon: '下午', evening: '晚上', night: '深夜' };
 
   if (!positive) {
-    // Cut-penalty: penalize facts that led to this skip
-    const coreFacts = getCoreFacts();
-    let changed = false;
-    for (const f of coreFacts) {
-      if (f.content.includes(pattern)) {
-        f.confidence = Math.max(0.3, f.confidence - 0.05);
-        f.updated = new Date().toISOString();
-        changed = true;
+    // Two-level cut penalty: song-level first, artist-level only if ≥2 different songs cut
+    const played = getPlayedInSession(1);
+    if (played.length) {
+      await addCutRecord(played[0].id, played[0].artist);
+      if (shouldPenalizeArtist(played[0].artist)) {
+        const coreFacts = getCoreFacts();
+        let changed = false;
+        for (const f of coreFacts) {
+          if (f.content.includes(played[0].artist)) {
+            f.confidence = Math.max(0.3, f.confidence - 0.05);
+            f.updated = new Date().toISOString();
+            changed = true;
+          }
+        }
+        if (changed) await updatePrefs({ facts: coreFacts });
       }
     }
-    if (changed) await updatePrefs({ facts: coreFacts });
-    // Also add to dislikes as safety net
-    await addDislike(pattern);
+    // Add pattern to dislikes
+    if (pattern) await addDislike(pattern);
     return;
   }
 
@@ -713,7 +741,8 @@ export function buildMemoryContext() {
     parts.push(`## 情绪干预\n检测到情绪连续下降，优先推荐平静/治愈类音乐`);
   }
 
-  const ctx = parts.join('\n\n');
+  // Entity compression: shorten repeated artist names
+  const ctx = parts.join('\n\n').replace(/周杰伦/g, '周').replace(/陈奕迅/g, '陈').replace(/林俊杰/g, '林').replace(/草东没有派对/g, '草东');
   return ctx.length > 1500 ? ctx.slice(0, 1500) + '…' : ctx;
 }
 
