@@ -6,11 +6,20 @@ const adapter = new JSONFile(config.STATE_PATH);
 const defaults = {
   messages: [],
   plays: [],
-  // Long-term memory structures
-  songStats: {},     // { songId: { name, artist, playCount, lastPlayed, firstPlayed } }
-  artistStats: {},   // { artistName: { playCount, lastPlayed } }
+  songStats: {},
+  artistStats: {},
   session: { totalPlays: 0, totalMinutes: 0 },
-  prefs: { topArtists: [], topGenres: [], moodHistory: [] },
+  // Tiered memory storage
+  prefs: {
+    topArtists: [], topGenres: [], moodHistory: [],
+    facts: [],               // LTM core: high-confidence facts (≤30)
+    extensionFacts: [],       // LTM extension: all facts (≤500)
+    candidateFacts: [],       // Candidate pool: pending confirmation (confidence < 0.6)
+    dislikes: [],             // Negative preferences: artists to avoid
+    patternMatrix: {},        // { artist: { timeSlot: count } }
+    summary: '',
+    lastSummaryIdx: 0,
+  },
 };
 const db = new Low(adapter, defaults);
 
@@ -23,6 +32,10 @@ try { await db.read(); } catch {
 if (!db.data.songStats) db.data.songStats = {};
 if (!db.data.artistStats) db.data.artistStats = {};
 if (!db.data.session) db.data.session = { totalPlays: 0, totalMinutes: 0 };
+if (!db.data.prefs.candidateFacts) db.data.prefs.candidateFacts = [];
+if (!db.data.prefs.extensionFacts) db.data.prefs.extensionFacts = [];
+if (!db.data.prefs.dislikes) db.data.prefs.dislikes = [];
+if (!db.data.prefs.patternMatrix) db.data.prefs.patternMatrix = {};
 
 // Debounced write
 let writeTimer = null;
@@ -76,6 +89,14 @@ export async function addPlay(song) {
   // Update session stats
   db.data.session.totalPlays++;
   if (song.dt) db.data.session.totalMinutes += Math.round(song.dt / 60000);
+
+  // Update artist × timeSlot pattern matrix
+  if (artist) {
+    const h = new Date().getHours();
+    const slot = h < 6 ? 'night' : h < 9 ? 'morning' : h < 14 ? 'noon' : h < 18 ? 'afternoon' : h < 22 ? 'evening' : 'night';
+    if (!db.data.prefs.patternMatrix[artist]) db.data.prefs.patternMatrix[artist] = {};
+    db.data.prefs.patternMatrix[artist][slot] = (db.data.prefs.patternMatrix[artist][slot] || 0) + 1;
+  }
 
   scheduleWrite();
 }
@@ -131,4 +152,79 @@ export function wasPlayedRecently(songId, hours = 24) {
 
 export function getSessionStats() {
   return { ...db.data.session };
+}
+
+// Get pattern matrix for a specific time slot
+export function getPatternForSlot(slot, n = 5) {
+  const matrix = db.data.prefs.patternMatrix || {};
+  return Object.entries(matrix)
+    .filter(([, slots]) => slots[slot] > 0)
+    .sort((a, b) => (b[1][slot] || 0) - (a[1][slot] || 0))
+    .slice(0, n)
+    .map(([artist, slots]) => ({ artist, count: slots[slot] }));
+}
+
+// Get dislikes list
+export function getDislikes() {
+  return db.data.prefs.dislikes || [];
+}
+
+export async function addDislike(artist) {
+  if (!db.data.prefs.dislikes.includes(artist)) {
+    db.data.prefs.dislikes.push(artist);
+    if (db.data.prefs.dislikes.length > 50) db.data.prefs.dislikes.shift();
+    scheduleWrite();
+  }
+}
+
+export async function removeDislike(artist) {
+  db.data.prefs.dislikes = db.data.prefs.dislikes.filter(d => d !== artist);
+  scheduleWrite();
+}
+
+// Get candidate facts (pending confirmation)
+export function getCandidateFacts() {
+  return db.data.prefs.candidateFacts || [];
+}
+
+export async function addCandidateFact(fact) {
+  const candidates = db.data.prefs.candidateFacts || [];
+  const existing = candidates.find(c => c.id === fact.id);
+  if (existing) {
+    existing.count = (existing.count || 1) + 1;
+    existing.updated = new Date().toISOString();
+    // Promote to core facts if observed ≥2 times
+    if (existing.count >= 2) {
+      const coreFacts = db.data.prefs.facts || [];
+      existing.confidence = Math.min(0.9, existing.confidence + 0.3);
+      coreFacts.push({ ...existing, category: fact.category, content: fact.content });
+      if (coreFacts.length > 30) coreFacts.sort((a, b) => (b.confidence * b.count) - (a.confidence * a.count)).splice(30);
+      db.data.prefs.facts = coreFacts;
+      db.data.prefs.candidateFacts = candidates.filter(c => c.id !== fact.id);
+    }
+  } else {
+    candidates.push({ ...fact, count: 1, created: new Date().toISOString(), updated: new Date().toISOString() });
+    if (candidates.length > 100) candidates.shift();
+    db.data.prefs.candidateFacts = candidates;
+  }
+  scheduleWrite();
+}
+
+// Get extension facts (for search, not injected into context)
+export function getExtensionFacts() {
+  return db.data.prefs.extensionFacts || [];
+}
+
+export async function addExtensionFact(fact) {
+  const ext = db.data.prefs.extensionFacts || [];
+  const existing = ext.find(e => e.id === fact.id);
+  if (existing) {
+    existing.count = (existing.count || 1) + 1;
+    existing.updated = new Date().toISOString();
+  } else {
+    ext.push({ ...fact, created: new Date().toISOString(), updated: new Date().toISOString() });
+    if (ext.length > 500) ext.sort((a, b) => (b.confidence * b.count) - (a.confidence * a.count)).splice(500);
+  }
+  db.data.prefs.extensionFacts = ext;
+  scheduleWrite();
 }
