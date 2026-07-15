@@ -1,14 +1,35 @@
+/**
+ * 音乐老友 — 分层记忆系统
+ *
+ * ┌─────────────────┬──────────────────┬─────────────────────┐
+ * │  工作记忆 (WM)   │  情景记忆 (EM)    │  长期偏好 (LTM)      │
+ * │  当前会话上下文   │  近期交互+状态     │  稳定用户画像         │
+ * │  LLM context窗口 │  songStats/plays  │  facts + taste + md │
+ * │  仅限当前会话     │  数小时~数周 衰减   │  持久化              │
+ * └─────────────────┴──────────────────┴─────────────────────┘
+ *
+ * 写入：LLM remember字段 + 反馈信号（喜欢/跳过）→ 更新置信度
+ * 管理：时间衰减 + 去重 + 定期清理低置信度事实
+ * 读取：按相关性分层检索，只注入最相关的记忆到 LLM 上下文
+ */
+
 import { readFileSync, existsSync } from 'fs';
 import { writeFile } from 'fs/promises';
 import { resolve } from 'path';
 import config from '../config.js';
-import { getRecentMessages, getRecentPlays, getPrefs, updatePrefs } from '../state/db.js';
+import { getRecentMessages, getRecentPlays, getPrefs, updatePrefs, getTopArtistsLongTerm } from '../state/db.js';
 
 const MEMORY_PATH = resolve(config.USER_DIR, 'memory.md');
 
-// ---- 1. HERMES FROZEN SNAPSHOT: memory.md ----
+// ═══════════════════════════════════════════
+// LAYER 1: 工作记忆 — LLM context 窗口自带
+// ═══════════════════════════════════════════
+// (由 context.js 的 buildChatHistory 实现)
 
-// Read once at module load (frozen snapshot pattern)
+// ═══════════════════════════════════════════
+// LAYER 2: 情景记忆 — 冻结快照 memory.md
+// ═══════════════════════════════════════════
+
 let _snapshot = null;
 export function getMemorySnapshot() {
   if (_snapshot === null) {
@@ -17,7 +38,6 @@ export function getMemorySnapshot() {
   return _snapshot;
 }
 
-// Agent-controlled memory writes (add/remove lines)
 export async function rememberLine(text) {
   const current = getMemorySnapshot();
   const line = `- ${text}`;
@@ -35,20 +55,20 @@ export async function forgetLine(pattern) {
   _snapshot = updated;
 }
 
-// ---- 2. STRUCTURED FACTS STORE ----
-
-// Facts format: { id, category, content, confidence, created, updated }
+// ═══════════════════════════════════════════
+// LAYER 3: 长期偏好 — 结构化事实存储
+// ═══════════════════════════════════════════
+// Facts: { id, category, content, confidence, created, updated, count }
 // Categories: user_habit, preference, mood, event, relationship, discovery
 
 function factId(content) {
-  // Simple stable hash for dedup
   let h = 0;
   for (let i = 0; i < content.length; i++) { h = ((h << 5) - h) + content.charCodeAt(i); h |= 0; }
   return Math.abs(h).toString(36);
 }
 
 function getFacts() {
-  return getPrefs().facts || [];
+  return (getPrefs().facts || []).filter(f => f.confidence >= 0.3);
 }
 
 async function addFact(category, content, confidence = 0.5) {
@@ -59,18 +79,188 @@ async function addFact(category, content, confidence = 0.5) {
   const now = new Date().toISOString();
 
   if (existing) {
-    // Update existing fact: bump confidence, update time
     existing.content = content;
     existing.confidence = Math.min(1, existing.confidence + confidence * 0.3);
     existing.updated = now;
     existing.count = (existing.count || 1) + 1;
   } else {
     facts.push({ id, category, content, confidence, created: now, updated: now, count: 1 });
-    // Keep max 100 facts
     if (facts.length > 100) facts.splice(0, facts.length - 100);
   }
   await updatePrefs({ facts });
 }
+
+// ---- 反馈驱动：显式信号（喜欢/跳过）调整置信度 ----
+
+export async function feedbackBoost(pattern, positive = true) {
+  const prefs = getPrefs();
+  const facts = prefs.facts || [];
+  let changed = false;
+  for (const f of facts) {
+    if (f.content.includes(pattern) || pattern.includes(f.content.slice(0, 20))) {
+      f.confidence = Math.min(1, f.confidence + (positive ? 0.15 : -0.15));
+      f.updated = new Date().toISOString();
+      changed = true;
+    }
+  }
+  if (changed) {
+    prefs.facts = facts.filter(f => f.confidence >= 0.3);
+    await updatePrefs({ facts: prefs.facts });
+  }
+}
+
+// ---- 管理：时间衰减 ----
+
+function decayFacts() {
+  const prefs = getPrefs();
+  const facts = prefs.facts || [];
+  if (!facts.length) return;
+  const now = Date.now();
+  let changed = false;
+  for (const f of facts) {
+    const days = (now - new Date(f.updated).getTime()) / (1000 * 60 * 60 * 24);
+    if (f.category === 'mood') {
+      // 情绪：指数衰减，半衰期 3 天
+      f.confidence = f.confidence * Math.pow(0.5, Math.max(0, days - 1) / 3);
+    } else if (days > 7) {
+      // 偏好/习惯：线性慢衰减
+      f.confidence = Math.max(0, f.confidence - (days - 7) * 0.01);
+    }
+    if (f.confidence < 0.3) f.confidence = 0; // flaga for removal
+    changed = true;
+  }
+  if (changed) {
+    prefs.facts = facts.filter(f => f.confidence >= 0.3);
+    updatePrefs({ facts: prefs.facts }).catch(() => {});
+  }
+}
+
+decayFacts(); // module load 时执行
+
+// ---- 管理：去重合并 ----
+
+function consolidateFacts() {
+  const prefs = getPrefs();
+  const facts = prefs.facts || [];
+  if (facts.length < 5) return;
+  const merged = [];
+  const seen = new Set();
+  // 按置信度排序，高置信度优先保留
+  const sorted = [...facts].sort((a, b) => (b.confidence * (b.count || 1)) - (a.confidence * (a.count || 1)));
+  for (const f of sorted) {
+    const key = f.category + ':' + f.id;
+    const similar = merged.find(m => m.category === f.category && m.id === f.id);
+    if (similar) {
+      similar.confidence = Math.max(similar.confidence, f.confidence);
+      similar.count += f.count || 1;
+    } else if (!seen.has(key)) {
+      seen.add(key);
+      merged.push(f);
+    }
+  }
+  if (merged.length < facts.length) {
+    updatePrefs({ facts: merged.slice(0, 100) }).catch(() => {});
+  }
+}
+
+// ---- 写入：从对话提取事实（启发式 + 可升级为 LLM） ----
+
+async function extractFacts() {
+  const messages = getRecentMessages(60);
+  if (messages.length < 15) return;
+
+  const userMsgs = messages.filter(m => m.role === 'user').slice(-15);
+  const facts = [];
+
+  // 情绪检测
+  const moodMap = {
+    '累|疲惫|困|乏': { cat: 'mood', fact: '用户感到疲惫/困倦', conf: 0.6 },
+    '烦|躁|不爽|生气': { cat: 'mood', fact: '用户心情烦躁', conf: 0.6 },
+    '难过|伤心|emo|down|sad|哭|低落': { cat: 'mood', fact: '用户情绪低落', conf: 0.7 },
+    '开心|高兴|爽|nice|哈哈|快乐': { cat: 'mood', fact: '用户心情不错', conf: 0.6 },
+    '焦虑|压力|紧张|慌|担心': { cat: 'mood', fact: '用户焦虑/有压力', conf: 0.7 },
+    '失眠|睡不着|深夜|凌晨': { cat: 'user_habit', fact: '用户深夜听歌', conf: 0.8 },
+    '加班|工作|忙|996': { cat: 'event', fact: '用户最近工作很忙', conf: 0.6 },
+    '复习|考试|学习|看书': { cat: 'event', fact: '用户在备考/学习', conf: 0.7 },
+  };
+  for (const m of userMsgs) {
+    for (const [pattern, { cat, fact, conf }] of Object.entries(moodMap)) {
+      if (new RegExp(pattern).test(m.content)) {
+        facts.push({ cat, fact, conf });
+      }
+    }
+  }
+
+  // 行为模式
+  if (userMsgs.filter(m => /^漫游$/.test(m.content.trim())).length >= 2)
+    facts.push({ cat: 'user_habit', fact: '偏好漫游模式', conf: 0.8 });
+  if (userMsgs.filter(m => /继续/.test(m.content)).length >= 3)
+    facts.push({ cat: 'user_habit', fact: '喜欢连续听歌不停歇', conf: 0.7 });
+
+  // 歌手偏好
+  const artistSet = new Set();
+  const artistRegex = /周杰伦|林俊杰|陈奕迅|丁世光|陈粒|孙燕姿|邓紫棋|薛之谦|陶喆|方大同|李荣浩|五月天|苏打绿|告五人|草东|万能青年旅店|王心凌|郑宜农|Coldplay|Adele|郭顶|许嵩|蔡健雅|张惠妹|Taylor Swift|Ed Sheeran/g;
+  for (const m of userMsgs) {
+    const matches = m.content.match(artistRegex);
+    if (matches) for (const a of matches) artistSet.add(a);
+  }
+  for (const a of artistSet) {
+    facts.push({ cat: 'preference', fact: `喜欢听${a}`, conf: 0.7 });
+  }
+
+  // 互动风格
+  if (userMsgs.filter(m => m.content.trim().length < 4).length >= 5)
+    facts.push({ cat: 'user_habit', fact: '聊天简洁，习惯短指令', conf: 0.6 });
+
+  // 去重写入
+  const seen = new Set();
+  for (const { cat, fact, conf } of facts) {
+    const key = cat + ':' + fact;
+    if (!seen.has(key)) { seen.add(key); await addFact(cat, fact, conf); }
+  }
+}
+
+// ═══════════════════════════════════════════
+// 读取：按相关性分层检索
+// ═══════════════════════════════════════════
+
+/** 按关键词搜索记忆（用于 agent 主动回忆） */
+export function recallMemory(query, maxResults = 5) {
+  if (!query) return [];
+  const q = query.toLowerCase();
+  const facts = getFacts().filter(f => f.confidence >= 0.4);
+  const scored = facts.map(f => {
+    let score = 0;
+    const c = f.content.toLowerCase();
+    if (c.includes(q)) score += 10;
+    // Category bonus
+    if (q.includes('喜欢') && f.category === 'preference') score += 5;
+    if ((q.includes('心情') || q.includes('情绪')) && f.category === 'mood') score += 5;
+    score += f.confidence * 3 + (f.count || 0) * 0.5;
+    return { fact: f, score };
+  });
+  return scored.filter(s => s.score > 0).sort((a, b) => b.score - a.score).slice(0, maxResults).map(s => s.fact);
+}
+
+/** 获取与当前话题最相关的记忆 */
+export function getRelevantFacts(topic = '', maxResults = 5) {
+  if (topic) return recallMemory(topic, maxResults);
+  // 无话题时返回最高置信度事实
+  return getFacts().filter(f => f.confidence >= 0.5)
+    .sort((a, b) => (b.confidence * (b.count || 1)) - (a.confidence * (a.count || 1)))
+    .slice(0, maxResults);
+}
+
+/** Top N 事实摘要 */
+export function getTopFacts(n = 5) {
+  return getFacts().filter(f => f.confidence >= 0.5)
+    .sort((a, b) => (b.confidence * (b.count || 1)) - (a.confidence * (a.count || 1)))
+    .slice(0, n).map(f => f.content);
+}
+
+// ═══════════════════════════════════════════
+// 摘要 + 模式分析
+// ═══════════════════════════════════════════
 
 function formatFacts(facts) {
   if (!facts || !facts.length) return '';
@@ -81,176 +271,46 @@ function formatFacts(facts) {
   const catLabels = { user_habit: '习惯', preference: '偏好', mood: '情绪', event: '事件', relationship: '关联', discovery: '发现' };
   let text = '';
   for (const [cat, items] of Object.entries(byCat)) {
-    const label = catLabels[cat] || cat;
-    text += `\n${label}: ${items.slice(0, 3).map(f => f.content).join('；')}`;
+    text += `\n${catLabels[cat] || cat}: ${items.slice(0, 3).map(f => f.content).join('；')}`;
   }
   return text.trim();
 }
-
-// ---- 3. WRITE-BEFORE-COMPRESS: LLM Fact Extraction ----
-
-async function extractFacts() {
-  const messages = getRecentMessages(80);
-  if (messages.length < 20) return;
-
-  // Build conversation transcript for analysis
-  const transcript = messages.map(m => `[${m.role}] ${m.content}`).join('\n');
-  const userMsgs = messages.filter(m => m.role === 'user').slice(-20);
-
-  // Heuristic fact extraction — categories with patterns
-  const facts = [];
-
-  // Mood detection
-  const moodMap = {
-    '累': { cat: 'mood', fact: '用户感到疲惫', conf: 0.6 },
-    '困': { cat: 'mood', fact: '用户睡眠不足', conf: 0.5 },
-    '烦': { cat: 'mood', fact: '用户心情烦躁，需要舒缓', conf: 0.6 },
-    '难过|伤心|emo|down|sad': { cat: 'mood', fact: '用户情绪低落', conf: 0.7 },
-    '开心|高兴|太好了|哈哈|爽|nice': { cat: 'mood', fact: '用户心情不错', conf: 0.6 },
-    '焦虑|压力|紧张': { cat: 'mood', fact: '用户感到压力/焦虑', conf: 0.7 },
-    '无聊': { cat: 'mood', fact: '用户感到无聊，想听新鲜的', conf: 0.5 },
-    '深夜|凌晨|失眠|睡不着': { cat: 'user_habit', fact: '用户经常深夜听歌', conf: 0.8 },
-  };
-  for (const m of userMsgs) {
-    for (const [pattern, { cat, fact, conf }] of Object.entries(moodMap)) {
-      if (new RegExp(pattern).test(m.content)) {
-        facts.push({ cat, fact, conf });
-      }
-    }
-  }
-
-  // Habit detection
-  if (userMsgs.filter(m => /^漫游$/.test(m.content.trim())).length >= 3) {
-    facts.push({ cat: 'user_habit', fact: '偏好漫游模式听歌，不喜欢自己选', conf: 0.8 });
-  }
-  if (userMsgs.filter(m => /继续/.test(m.content)).length >= 3) {
-    facts.push({ cat: 'user_habit', fact: '经常连续听歌不停歇', conf: 0.7 });
-  }
-
-  // Time-based habit
-  const nightMsgs = userMsgs.filter(m => {
-    const t = m.time ? new Date(m.time) : null;
-    return t && (t.getHours() >= 23 || t.getHours() < 5);
-  });
-  if (nightMsgs.length >= 3) {
-    facts.push({ cat: 'user_habit', fact: '深夜听歌频次高', conf: 0.9 });
-  }
-
-  // Artist preferences from conversation
-  for (const m of userMsgs) {
-    const artists = m.content.match(/周杰伦|林俊杰|陈奕迅|丁世光|陈粒|孙燕姿|A-Lin|邓紫棋|薛之谦|Taylor|Ed Sheeran|Justin Bieber|陶喆|方大同|李荣浩|林宥嘉|五月天|苏打绿|告五人|草东|万能青年旅店/g);
-    if (artists) {
-      for (const a of artists) {
-        facts.push({ cat: 'preference', fact: `喜欢听${a}`, conf: 0.7 });
-      }
-    }
-  }
-
-  // Song name extraction — from ALL messages (user + assistant)
-  for (const m of messages) {
-    // Match 《song name》 and "song name" patterns
-    const bookMatches = [...m.content.matchAll(/《([^》]{1,40})》/g)];
-    for (const match of bookMatches) {
-      const songName = match[1].trim();
-      if (songName.length >= 2 && songName.length <= 40) {
-        // Check if it's a song mention (not just random text in quotes)
-        const ctx = m.content;
-        const isMusicCtx = /歌|曲|听|唱|播|放|推荐|喜欢|爱/.test(ctx.slice(Math.max(0, match.index - 10), match.index));
-        if (isMusicCtx || m.role === 'assistant') {
-          facts.push({ cat: 'discovery', fact: `听过《${songName}》`, conf: 0.6 });
-        }
-      }
-    }
-    // Also match quoted song names: "song name" (assistant replies often use this)
-    const quoteMatches = [...m.content.matchAll(/"([^"]{1,40})"/g)];
-    for (const match of quoteMatches) {
-      const songName = match[1].trim();
-      if (songName.length >= 2 && songName.length <= 40 && !/[，。！？、；：]/.test(songName)) {
-        facts.push({ cat: 'discovery', fact: `听过《${songName}》`, conf: 0.5 });
-      }
-    }
-    // Extract from assistant's song recommendations
-    if (m.role === 'assistant') {
-      const reasonMatch = m.content.match(/《([^》]+)》/g);
-      if (reasonMatch) {
-        for (const rm of reasonMatch) {
-          const name = rm.replace(/[《》]/g, '').trim();
-          if (name.length >= 2 && name.length <= 40) {
-            facts.push({ cat: 'discovery', fact: `推荐过《${name}》`, conf: 0.5 });
-          }
-        }
-      }
-    }
-  }
-
-  // Interaction style
-  const shortMsgs = userMsgs.filter(m => m.content.trim().length < 4);
-  if (shortMsgs.length >= 5 && userMsgs.length >= 10) {
-    facts.push({ cat: 'user_habit', fact: '聊天简洁，喜欢短指令', conf: 0.6 });
-  }
-  const longMsgs = userMsgs.filter(m => m.content.trim().length > 30);
-  if (longMsgs.length >= 3) {
-    facts.push({ cat: 'user_habit', fact: '愿意跟agent深度交流', conf: 0.5 });
-  }
-
-  // Dedup and store
-  const seen = new Set();
-  for (const { cat, fact, conf } of facts) {
-    const key = cat + ':' + fact;
-    if (!seen.has(key)) {
-      seen.add(key);
-      await addFact(cat, fact, conf);
-    }
-  }
-}
-
-// ---- 4. SUMMARIZE WITH LLM (Write-Before-Compress) ----
 
 export async function maybeSummarize(force = false) {
   const messages = getRecentMessages(200);
   const prefs = getPrefs();
   const lastIdx = prefs.lastSummaryIdx || 0;
   const newMsgs = messages.slice(lastIdx);
-
   if (!force && newMsgs.length < 30) return;
 
-  // STEP 1: Write-before-compress — extract critical facts first
   await extractFacts();
+  decayFacts();
+  consolidateFacts();
 
-  // STEP 2: Build structured session block
   const userMsgs = newMsgs.filter(m => m.role === 'user');
   const assistantMsgs = newMsgs.filter(m => m.role === 'assistant');
   const blocks = [];
 
-  // Time range
   const firstTime = newMsgs[0]?.time;
   const lastTime = newMsgs[newMsgs.length - 1]?.time;
   if (firstTime && lastTime) {
-    const d1 = new Date(firstTime);
-    const d2 = new Date(lastTime);
-    if (d1.toDateString() === d2.toDateString()) {
-      blocks.push(`${d1.getMonth() + 1}月${d1.getDate()}日`);
-    } else {
-      blocks.push(`${d1.getMonth() + 1}/${d1.getDate()}-${d2.getMonth() + 1}/${d2.getDate()}`);
-    }
+    const d1 = new Date(firstTime), d2 = new Date(lastTime);
+    blocks.push(d1.toDateString() === d2.toDateString()
+      ? `${d1.getMonth() + 1}月${d1.getDate()}日`
+      : `${d1.getMonth() + 1}/${d1.getDate()}-${d2.getMonth() + 1}/${d2.getDate()}`);
   }
 
-  // Operations
-  const ops = [...new Set(userMsgs.map(m => m.content.trim()).filter(c => {
-    return /^漫游$|^继续$|^排行榜$|^歌单$|^推荐$|^新歌$|^热门歌手$|^搜索|^播放/.test(c);
-  }))];
+  const ops = [...new Set(userMsgs.map(m => m.content.trim()).filter(c =>
+    /^漫游$|^继续$|^排行榜$|^歌单$|^推荐$|^新歌$|^热门歌手$|^搜索|^播放/.test(c)
+  ))];
   if (ops.length) blocks.push(`操作: ${ops.slice(0, 5).join('→')}`);
 
-  // Mood signals (from fact extraction results)
-  const facts = getFacts();
-  const recentMoods = facts.filter(f => f.category === 'mood').slice(0, 3);
-  if (recentMoods.length) blocks.push(`情绪: ${recentMoods.map(f => f.content).join('，')}`);
+  const topFacts = getTopFacts(3);
+  if (topFacts.length) blocks.push(`关键: ${topFacts.join('；')}`);
 
-  // Key agent replies (sample unique ones)
-  const replies = assistantMsgs.slice(-5).map(m => m.content);
-  if (replies.length) blocks.push(`回复: ${[...new Set(replies)].slice(-3).join(' | ')}`);
+  const replies = assistantMsgs.slice(-3).map(m => m.content.replace(/\n/g, ' ').slice(0, 80));
+  if (replies.length) blocks.push(`回复: ${[...new Set(replies)].join(' | ')}`);
 
-  // Merge
   const oldSummary = prefs.summary || '';
   const newBlock = blocks.join(' — ');
   const oldBlocks = oldSummary ? oldSummary.split('\n---\n').filter(Boolean) : [];
@@ -262,131 +322,120 @@ export async function maybeSummarize(force = false) {
   }
 }
 
-// ---- 5. STATISTICAL PLAY PATTERNS ----
+// ═══════════════════════════════════════════
+// 播放模式分析（情景记忆 → 长期偏好）
+// ═══════════════════════════════════════════
 
 const DECAY_HALF = 7;
 function decayWeight(timestamp, now = Date.now()) {
-  const daysAgo = (now - new Date(timestamp).getTime()) / (1000 * 60 * 60 * 24);
-  return Math.pow(0.5, daysAgo / DECAY_HALF);
+  return Math.pow(0.5, (now - new Date(timestamp).getTime()) / (1000 * 60 * 60 * 24) / DECAY_HALF);
 }
 
 export function analyzePatterns() {
   const plays = getRecentPlays(500);
-  const prefs = getPrefs();
   if (plays.length < 5) return '';
 
   const now = Date.now();
   let totalWeight = 0;
   const buckets = { morning: 0, noon: 0, afternoon: 0, evening: 0, night: 0 };
   const artistWeights = {};
-  const artistTimes = {};
 
-  for (let i = 0; i < plays.length; i++) {
-    const p = plays[i];
+  for (const p of plays) {
     if (!p.time) continue;
     const w = decayWeight(p.time, now);
     totalWeight += w;
     const h = new Date(p.time).getHours();
-    const bucket = h < 6 ? 'night' : h < 9 ? 'morning' : h < 12 ? 'noon' : h < 14 ? 'noon' : h < 18 ? 'afternoon' : h < 22 ? 'evening' : 'night';
-    buckets[bucket] += w;
+    buckets[h < 6 ? 'night' : h < 9 ? 'morning' : h < 12 ? 'noon' : h < 14 ? 'noon' : h < 18 ? 'afternoon' : h < 22 ? 'evening' : 'night'] += w;
     const artist = typeof p.ar === 'string' ? p.ar : (p.ar || [])[0];
-    if (artist) {
-      artistWeights[artist] = (artistWeights[artist] || 0) + w;
-      if (!artistTimes[artist]) artistTimes[artist] = { morning: 0, noon: 0, afternoon: 0, evening: 0, night: 0 };
-      artistTimes[artist][bucket] += w;
-    }
+    if (artist) artistWeights[artist] = (artistWeights[artist] || 0) + w;
   }
 
   const timeLabels = { morning: '早上', noon: '中午', afternoon: '下午', evening: '晚上', night: '深夜' };
   const total = totalWeight || 1;
-  const topTimes = Object.entries(buckets).filter(([, v]) => v / total > 0.1).sort((a, b) => b[1] - a[1]).slice(0, 3)
+  const topTimes = Object.entries(buckets).filter(([, v]) => v / total > 0.1)
+    .sort((a, b) => b[1] - a[1]).slice(0, 2)
     .map(([k, v]) => `${timeLabels[k]}(${Math.round(v / total * 100)}%)`);
 
-  const topArtists = Object.entries(artistWeights).sort((a, b) => b[1] - a[1]).slice(0, 8).map(([name]) => name);
+  const topArtists = Object.entries(artistWeights).sort((a, b) => b[1] - a[1]).slice(0, 5).map(([n]) => n);
+  const longTerm = getTopArtistsLongTerm(5).map(a => a.name);
+  const allArtists = [...new Set([...topArtists, ...longTerm])].slice(0, 6);
 
-  const artistAffinity = topArtists.slice(0, 3).map(a => {
-    const times = artistTimes[a] || {};
-    const best = Object.entries(times).sort((x, y) => y[1] - x[1])[0];
-    return best && best[1] > 0 ? `${a}→${timeLabels[best[0]] || best[0]}` : a;
-  });
+  let patterns = ``;
+  if (topTimes.length) patterns += `时段: ${topTimes.join('、')}`;
+  if (allArtists.length) patterns += `\n歌手: ${allArtists.join('、')}`;
 
-  let patterns = `时段: ${topTimes.join('、')}`;
-  patterns += `\n歌手: ${topArtists.slice(0, 5).join('、')}`;
-  if (artistAffinity.some(a => a.includes('→'))) patterns += `\n关联: ${artistAffinity.join(' ')}`;
   updatePrefs({ patterns }).catch(() => {});
   return patterns;
 }
 
-// ---- 6. BUILD MEMORY CONTEXT (injected into system prompt) ----
+// ═══════════════════════════════════════════
+// 读取：构建分层记忆上下文（注入 LLM）
+// ═══════════════════════════════════════════
 
 export function buildMemoryContext() {
   const prefs = getPrefs();
   const parts = [];
 
-  // Frozen snapshot: memory.md
+  // 1. 长期记忆快照（最重要——用户手动写的或 agent 长期记录的）
   const snapshot = getMemorySnapshot();
   if (snapshot && snapshot.replace(/^#.*\n?/gm, '').trim()) {
     parts.push(`## 长期记忆\n${snapshot}`);
   }
 
-  // Structured facts (high confidence only)
-  const facts = (prefs.facts || []).filter(f => f.confidence >= 0.5).sort((a, b) => (b.confidence * (b.count || 1)) - (a.confidence * (a.count || 1)));
+  // 2. 高置信度事实（结构化、已衰减筛选）
+  const facts = getFacts().filter(f => f.confidence >= 0.5);
   if (facts.length > 0) {
-    parts.push(`## 结构化事实\n${formatFacts(facts)}`);
+    parts.push(`## 用户画像\n${formatFacts(facts)}`);
   }
 
-  // Cross-session summary
-  if (prefs.summary) {
-    parts.push(`## 会话历史\n${prefs.summary}`);
-  }
-
-  // Play patterns
+  // 3. 播放模式（统计得出）
   if (prefs.patterns) {
     parts.push(`## 听歌模式\n${prefs.patterns}`);
   }
 
-  // Active session (last few user messages)
+  // 4. 跨会话摘要
+  if (prefs.summary) {
+    parts.push(`## 近期回顾\n${prefs.summary}`);
+  }
+
+  // 5. 当前对话流（工作记忆）
   const recentMsgs = getRecentMessages(5);
   if (recentMsgs.length > 1) {
     const flow = recentMsgs.filter(m => m.role === 'user').slice(-3).map(m => m.content).join(' → ');
-    if (flow) parts.push(`## 当前\n${flow}`);
+    if (flow) parts.push(`## 正在\n${flow}`);
   }
 
   const ctx = parts.join('\n\n');
-  return ctx.length > 1000 ? ctx.slice(0, 1000) + '…' : ctx;
+  return ctx.length > 1200 ? ctx.slice(0, 1200) + '…' : ctx;
 }
 
-// ---- 7. SESSION TOPIC TRACKING ----
+// ═══════════════════════════════════════════
+// 会话话题检测
+// ═══════════════════════════════════════════
 
 export function getSessionTopic() {
   const msgs = getRecentMessages(16);
   const userMsgs = msgs.filter(m => m.role === 'user').slice(-6);
   if (!userMsgs.length) return '';
 
-  // Detect topic keywords
-  const keywords = [];
   const topicPatterns = [
-    { re: /加班|工作|上班|忙|累|压力|996/i, topic: '工作压力大，需要放松' },
-    { re: /考试|复习|学习|背书|刷题/i, topic: '正在备考，需要专注音乐' },
-    { re: /失恋|分手|难过|伤心|想哭|emo/i, topic: '情绪低落，需要安慰' },
-    { re: /运动|跑步|健身|举铁|gym/i, topic: '在运动，需要节奏感' },
-    { re: /睡前|睡觉|失眠|躺/i, topic: '准备入睡，需要安静' },
-    { re: /开车|通勤|路上|地铁/i, topic: '在路上，需要陪伴感' },
-    { re: /聚会|派对|喝酒|party|嗨/i, topic: '聚会中，需要活跃气氛' },
-    { re: /下雨|雨天|雨声/i, topic: '下雨天，需要氛围感' },
+    { re: /加班|工作|上班|忙|累|压力|996/i, topic: '工作压力' },
+    { re: /考试|复习|学习|背书|刷题/i, topic: '备考学习' },
+    { re: /失恋|分手|难过|伤心|想哭|emo/i, topic: '情绪低落' },
+    { re: /运动|跑步|健身|举铁|gym/i, topic: '运动' },
+    { re: /睡前|睡觉|失眠|躺/i, topic: '睡前放松' },
+    { re: /开车|通勤|路上|地铁/i, topic: '通勤路上' },
+    { re: /聚会|派对|喝酒|party|嗨/i, topic: '聚会' },
+    { re: /下雨|雨天|雨声/i, topic: '下雨天' },
   ];
-
   for (const m of userMsgs) {
     for (const { re, topic } of topicPatterns) {
       if (re.test(m.content)) return topic;
     }
   }
 
-  // Detect if user keeps asking for specific genre/mood
-  const genres = userMsgs.map(m => m.content.match(/(?:来点|放|听|换)\s*(.{1,10}?)(?:的|歌|音乐|吧|$)/))
-    .filter(Boolean).map(m => m[1]);
-  if (genres.length >= 2) return `用户想听${genres[genres.length - 1]}风格`;
+  const moods = getFacts().filter(f => f.category === 'mood' && f.confidence >= 0.4);
+  if (moods.length) return moods.slice(-1)[0].content;
 
   return '';
 }
-

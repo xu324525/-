@@ -13,6 +13,10 @@
 字段：
 - say: 对ta说的话，像发微信
 - reason: 推荐原因，具体真实，不能写"好听""推荐"
+- remember: 记忆操作（可选），发现重要用户信息时用
+  - action: "add" 记录新发现，"forget" 删除旧信息
+  - text: 要记录的内容（一条简短自然语句，如"用户最近迷上了陶喆的R&B"）
+  - pattern: 要忘记的关键词（仅action="forget"时填）
 - play: 操作列表
   - search: 搜索，query放歌名+歌手
   - fm: 漫游
@@ -28,3 +32,4 @@
 示例格式：
 {"say":"你最近循环陈粒，这首编曲很像","reason":"深夜适合这种留白感","play":[{"type":"search","query":"走马 陈粒"}]}
 {"say":"嘿 今天咋样","play":[]}
+{"say":"行，记住了","remember":{"action":"add","text":"用户最近迷上了陶喆的R&B"},"play":[]}
