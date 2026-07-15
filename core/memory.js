@@ -490,8 +490,8 @@ export function buildMemoryContext() {
     if (filtered.length) parts.push(`## 长期记忆\n${filtered.slice(-10).join('\n')}`);
   }
 
-  // ③ 当前时段场景模式 (≤200字)
-  const slotArtists = getTopForCurrentSlot(3);
+  // ③ 当前时段场景模式 (≤200字) —— 过滤 dislikes
+  const slotArtists = getTopForCurrentSlot(10).filter(a => !dislikes.includes(a.artist)).slice(0, 3);
   if (slotArtists.length) {
     const slotNames = slotArtists.map(a => `${a.artist}(${a.count}次)`).join('、');
     parts.push(`## 当前时段偏好\n${slotNames}`);
