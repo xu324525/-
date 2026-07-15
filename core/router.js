@@ -1,7 +1,7 @@
 import { askLLM, parseResponse } from './llm.js';
 import { buildSystemPrompt, buildChatHistory } from './context.js';
 import { addMessage, addPlay, updatePrefs, getPrefs, getRecentPlays } from '../state/db.js';
-import { analyzePatterns, maybeSummarize, rememberLine, forgetLine } from './memory.js';
+import { analyzePatterns, maybeSummarize, rememberLine, forgetLine, feedbackBoost } from './memory.js';
 import {
   mapSong, currentSongObj, setList, cookieHeaders,
   markPlayed, isRecentlyPlayed, shuffle, artistCooldown,
@@ -109,7 +109,17 @@ export async function handleMessage(msg, send, broadcast, cookie = '') {
     '上一首': 'prev', '前一首': 'prev',
     '播放': 'play',
   };
-  if (simpleMap[text]) { send({ type: 'control', action: simpleMap[text] }); send({ type: 'reply', content: '👌', typing: false }); return; }
+  if (simpleMap[text]) {
+    // Feedback-driven memory: skip → slightly penalize current artist
+    if (simpleMap[text] === 'skip') {
+      const recent = getRecentPlays(1);
+      if (recent[0]) {
+        const artist = typeof recent[0].ar === 'string' ? recent[0].ar : (recent[0].ar || [])[0];
+        if (artist) feedbackBoost(artist, false).catch(() => {});
+      }
+    }
+    send({ type: 'control', action: simpleMap[text] }); send({ type: 'reply', content: '👌', typing: false }); return;
+  }
 
   // Toggle recommendation reason
   if (/^(显示|隐藏|打开|关闭)推荐理由$|^推荐理由(开|关|打开|隐藏|显示)$/.test(text)) {

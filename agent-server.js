@@ -92,6 +92,9 @@ async function main() {
 
         if (msg.type === 'chat') {
           await handleMessage(msg.content, send, send, wsCookie);
+        } else if (msg.type === 'feedback' && msg.artist) {
+          const { feedbackBoost } = await import('./core/memory.js');
+          await feedbackBoost(msg.artist, msg.action === 'like').catch(() => {});
         } else if (msg.type === 'skip' || msg.type === 'prev' || msg.type === 'play_pause' || msg.type === 'like') {
           send({ type: 'control', action: msg.type });
         } else if (msg.type === 'scrobble' && msg.songId) {

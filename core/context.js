@@ -2,7 +2,7 @@ import { readFileSync, existsSync } from 'fs';
 import { resolve } from 'path';
 import config from '../config.js';
 import { getRecentMessages, getRecentPlays, getPrefs, getTopArtistsLongTerm, getSessionStats } from '../state/db.js';
-import { buildMemoryContext, getSessionTopic } from './memory.js';
+import { buildMemoryContext, getSessionTopic, recallMemory } from './memory.js';
 
 function readUserFile(name) {
   const p = resolve(config.USER_DIR, name);
@@ -50,6 +50,15 @@ export function buildSystemPrompt(loginInfo = {}) {
 ${timeContext()}
 ${loginInfo.loggedIn ? `用户已登录网易云：${loginInfo.nickname}` : '用户未登录'}
 ${taste ? '用户自述口味：' + taste.slice(0,200) : ''}
+
+${(() => {
+  const topic = getSessionTopic();
+  if (topic) {
+    const relevant = recallMemory(topic, 3);
+    if (relevant.length) return `## 相关记忆\n${relevant.map(f => f.content).join('；')}`;
+  }
+  return '';
+})()}
 
 ${buildMemoryContext()}
 
