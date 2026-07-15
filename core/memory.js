@@ -208,6 +208,8 @@ async function addCandidateOrPromote(category, content, confidence = 0.5, feedba
     candidates.push({ id, category, content, confidence, count: 1, feedback: feedbackBoost, score: 1 + feedbackBoost * 2, slot: currentSlot, created: now, updated: now });
     if (candidates.length > 100) candidates.shift();
     await updatePrefs({ candidateFacts: candidates });
+    // Also update BM25 DF for new candidates (enables semantic search)
+    updateBM25DF(content);
   }
 }
 
@@ -388,7 +390,8 @@ export function recallMemory(query, maxResults = 5) {
   if (!query) return [];
   const coreFacts = getCoreFacts().filter(f => f.confidence >= 0.3);
   const extension = getExtensionFacts().filter(f => f.confidence >= 0.3);
-  const all = [...coreFacts, ...extension];
+  const candidates = (getPrefs().candidateFacts || []).filter(f => f.confidence >= 0.3);
+  const all = [...coreFacts, ...extension, ...candidates];
 
   const seen = new Set();
   const unique = all.filter(f => { const k = f.id; if (seen.has(k)) return false; seen.add(k); return true; });
@@ -446,47 +449,62 @@ export async function feedbackBoost(pattern, positive = true) {
   const timeLabels = { morning: '早上', noon: '中午', afternoon: '下午', evening: '晚上', night: '深夜' };
 
   if (!positive) {
-    // Two-level cut penalty: song-level first, artist-level only if ≥2 different songs cut
     const played = getPlayedInSession(1);
     if (played.length) {
       await addCutRecord(played[0].id, played[0].artist);
       if (shouldPenalizeArtist(played[0].artist)) {
         const coreFacts = getCoreFacts();
+        const candidates = getPrefs().candidateFacts || [];
         let changed = false;
         for (const f of coreFacts) {
-          if (f.content.includes(played[0].artist)) {
-            f.confidence = Math.max(0.3, f.confidence - 0.05);
-            f.updated = new Date().toISOString();
-            changed = true;
-          }
+          if (f.content.includes(played[0].artist)) { f.confidence = Math.max(0.3, f.confidence - 0.05); f.updated = new Date().toISOString(); changed = true; }
         }
-        if (changed) await updatePrefs({ facts: coreFacts });
+        for (const c of candidates) {
+          if (c.content.includes(played[0].artist)) { c.score = Math.max(0, (c.score || 0) - 0.5); changed = true; }
+        }
+        if (changed) await updatePrefs({ facts: coreFacts, candidateFacts: candidates });
       }
     }
-    // Add pattern to dislikes
     if (pattern) await addDislike(pattern);
     return;
   }
 
-  // Positive feedback: emotion-weighted initial confidence
+  // Positive feedback: search core + candidates for matching facts
   const coreFacts = getCoreFacts();
+  const candidates = getPrefs().candidateFacts || [];
   let found = false;
   for (const f of coreFacts) {
     if (f.content.includes(pattern) || pattern.includes(f.content.slice(0, 20))) {
       f.confidence = Math.min(1, f.confidence + 0.15);
       f.count = (f.count || 1) + 1;
-      f.updated = new Date().toISOString();
-      f.last_reviewed = new Date().toISOString();
+      f.updated = f.last_reviewed = new Date().toISOString();
       found = true;
     }
   }
-  if (found) {
-    await updatePrefs({ facts: coreFacts });
-  } else {
-    // New preference → candidate pool with feedback boost (×2 weight)
-    const initialConf = positive ? 0.5 + 0.3 : 0.5; // feedback gives higher initial confidence
-    await addCandidateOrPromote('preference', `喜欢听${pattern}`, initialConf, 1);
+  if (found) { await updatePrefs({ facts: coreFacts }); return; }
+
+  for (const c of candidates) {
+    if (c.content.includes(pattern) || pattern.includes(c.content.slice(0, 20))) {
+      c.feedback = (c.feedback || 0) + 1; c.count = (c.count || 1) + 1;
+      c.confidence = Math.min(0.9, c.confidence + 0.1); // feedback raises confidence too
+      const daysOld = (Date.now() - new Date(c.created || c.updated).getTime()) / 86400000;
+      c.score = (c.count * 1.0 + c.feedback * 2.0) * Math.exp(-0.01 * daysOld);
+      c.updated = new Date().toISOString();
+      found = true;
+      if (c.score >= 3.0 && c.confidence >= 0.65) {
+        const coreFacts = getCoreFacts();
+        coreFacts.push({ ...c, promoted: new Date().toISOString(), last_reviewed: new Date().toISOString(), review_count: 0 });
+        if (coreFacts.length > 30) coreFacts.sort((a, b) => (b.confidence * b.count) - (a.confidence * a.count)).splice(30);
+        await updatePrefs({ facts: coreFacts, candidateFacts: candidates.filter(x => x.id !== c.id) });
+        await addExtensionFact(c);
+        return;
+      }
+    }
   }
+  if (found) { await updatePrefs({ candidateFacts: candidates }); return; }
+
+  // New → candidate pool with feedback weight
+  await addCandidateOrPromote('preference', `喜欢听${pattern}`, 0.6, 1);
 
   // Contextual boost: create composite fact if mood + artist pattern detected
   const moods = coreFacts.filter(f => f.category === 'mood' && f.confidence >= 0.5);
